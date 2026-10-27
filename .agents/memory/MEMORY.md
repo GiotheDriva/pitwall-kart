@@ -1,1 +1,2 @@
 - [Go-kart endurance pit-wall product](go-kart-endurance.md) — live-timing names may be sourced; telemetry and strategy estimates are simulated.
+- [Streamlit preview routing](streamlit-preview-routing.md) — a standalone Streamlit workflow alone does not create this workspace's root web preview.
