@@ -9,10 +9,10 @@ router = "path"
 [[services]]
 name = "web"
 paths = ["/"]
-localPort = 5000
+localPort = 25630
 
 [services.development]
-run = "cd ../.. && streamlit run --server.address 0.0.0.0 --server.headless true --server.enableCORS false --server.enableWebsocketCompression false --server.port 5000 main.py"
+run = "cd ../.. && streamlit run --server.address 0.0.0.0 --server.headless true --server.enableCORS false --server.enableWebsocketCompression false --server.port $PORT main.py"
 
 [services.production]
 
@@ -20,14 +20,14 @@ run = "cd ../.. && streamlit run --server.address 0.0.0.0 --server.headless true
 args = ["python", "-m", "pip", "install", "-r", "requirements.txt"]
 
 [services.production.run]
-args = ["streamlit", "run", "--server.address", "0.0.0.0", "--server.headless", "true", "--server.enableCORS", "false", "--server.enableWebsocketCompression", "false", "--server.port", "5000", "main.py"]
+args = ["streamlit", "run", "--server.address", "0.0.0.0", "--server.headless", "true", "--server.enableCORS", "false", "--server.enableWebsocketCompression", "false", "--server.port", "25630", "main.py"]
 
 [services.production.run.env]
-PORT = "5000"
+PORT = "25630"
 
 [services.production.health.startup]
 path = "/"
 
 [services.env]
-PORT = "5000"
+PORT = "25630"
 BASE_PATH = "/"

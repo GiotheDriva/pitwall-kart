@@ -176,39 +176,41 @@ def extract_pilots(html_bytes: bytes) -> list[str]:
     html_text = html_bytes.decode("utf-8", errors="replace")
     pilots: list[str] = []
     seen: set[str] = set()
+    soup = BeautifulSoup(html_text, "lxml")
 
-    try:
-        tables = pd.read_html(io.BytesIO(html_bytes), flavor="lxml")
-    except (ValueError, ImportError):
-        tables = []
+    # Parse each table separately: a malformed/empty table must not prevent
+    # pandas from reading other valid timing tables on the same page.
+    for html_table in soup.find_all("table"):
+        try:
+            tables = pd.read_html(io.StringIO(str(html_table)), flavor="lxml")
+        except (AssertionError, ImportError, IndexError, TypeError, ValueError):
+            continue
 
-    for table in tables:
-        if table.empty:
-            continue
-        columns = list(table.columns)
-        candidate_columns = [
-            column
-            for column in columns
-            if PILOT_COLUMN_PATTERN.search(" ".join(map(str, column if isinstance(column, tuple) else [column])))
-            and not NON_NAME_COLUMN_PATTERN.search(
-                " ".join(map(str, column if isinstance(column, tuple) else [column]))
-            )
-        ]
-        if not candidate_columns:
-            continue
-        for column in candidate_columns:
-            for value in table[column].tolist():
-                name = clean_name(value)
-                if name and name.casefold() not in seen:
-                    seen.add(name.casefold())
-                    pilots.append(name)
+        for table in tables:
+            if table.empty:
+                continue
+            candidate_columns = []
+            for column_index, column in enumerate(table.columns):
+                label_parts = column if isinstance(column, tuple) else (column,)
+                label = " ".join(map(str, label_parts))
+                if (
+                    PILOT_COLUMN_PATTERN.search(label)
+                    and not NON_NAME_COLUMN_PATTERN.search(label)
+                ):
+                    candidate_columns.append(column_index)
+
+            for column_index in candidate_columns:
+                for value in table.iloc[:, column_index].tolist():
+                    name = clean_name(value)
+                    if name and name.casefold() not in seen:
+                        seen.add(name.casefold())
+                        pilots.append(name)
 
     if pilots:
         return pilots
 
     # Some timing pages expose a table without useful headers. Use its first
     # text-heavy column rather than mistaking lap/time/position values for names.
-    soup = BeautifulSoup(html_text, "lxml")
     for table in soup.find_all("table"):
         rows = table.find_all("tr")
         if not rows:
