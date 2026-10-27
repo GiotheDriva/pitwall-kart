@@ -1,0 +1,10 @@
+streamlit
+pandas
+requests
+beautifulsoup4
+lxml
+beautifulsoup4
+lxml
+pandas
+requests
+streamlit

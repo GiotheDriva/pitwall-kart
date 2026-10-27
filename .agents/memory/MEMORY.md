@@ -1,0 +1,1 @@
+- [Go-kart endurance pit-wall product](go-kart-endurance.md) — live-timing names may be sourced; telemetry and strategy estimates are simulated.
