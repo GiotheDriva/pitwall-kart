@@ -25,7 +25,30 @@ CARICATA = "_gara_caricata"   # ultima gara il cui link è stato caricato nel mu
 # --------------------------------------------------------------------------- #
 # Archivio
 # --------------------------------------------------------------------------- #
-def load_gare() -> list[dict]:
+def _client():
+    """Client Supabase se i Secrets sono impostati, altrimenti None (uso locale)."""
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+    except Exception:
+        return None
+    return _crea_client(url, key)
+
+
+@st.cache_resource(show_spinner=False)
+def _crea_client(url: str, key: str):
+    from supabase import create_client
+
+    return create_client(url, key)
+
+
+@st.cache_data(ttl=2, show_spinner=False)
+def _leggi_remoto() -> list[dict]:
+    res = _client().table("gare").select("dati").execute()
+    return [row["dati"] for row in (res.data or [])]
+
+
+def _leggi_locale() -> list[dict]:
     try:
         data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -33,10 +56,34 @@ def load_gare() -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def load_gare() -> list[dict]:
+    if _client() is None:
+        return _leggi_locale()
+    gare = _leggi_remoto()
+    locale = DATA_FILE.exists() and _leggi_locale()
+    if not gare and locale:
+        # Primo avvio con Supabase: importa le gare locali una sola volta.
+        save_gare(locale)
+        DATA_FILE.rename(DATA_FILE.with_suffix(".importato.json"))
+        return locale
+    return gare
+
+
 def save_gare(gare: list[dict]) -> None:
-    tmp = DATA_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(gare, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, DATA_FILE)
+    client = _client()
+    if client is None:
+        tmp = DATA_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(gare, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, DATA_FILE)
+        return
+    if gare:
+        client.table("gare").upsert([{"id": g["id"], "dati": g} for g in gare]).execute()
+    ids = {g["id"] for g in gare}
+    esistenti = client.table("gare").select("id").execute().data or []
+    for row in esistenti:
+        if row["id"] not in ids:
+            client.table("gare").delete().eq("id", row["id"]).execute()
+    _leggi_remoto.clear()
 
 
 def trova(gare: list[dict], gara_id: str) -> dict | None:
