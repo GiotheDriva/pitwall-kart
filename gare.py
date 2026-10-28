@@ -486,6 +486,48 @@ def cron_usa_apex(gara_id: str) -> None:
     _aggiorna(gara_id, lambda g: _cronometro(g).__setitem__("usa_apex", valore))
 
 
+# --------------------------------------------------------------------------- #
+# Penalità assegnate dal team (gestite dalla tab "Penalità e avvisi")
+# --------------------------------------------------------------------------- #
+def aggiungi_penalita(gara_id: str, pilota: str, tipo: str, valore: float, motivo: str) -> None:
+    def fn(g):
+        g.setdefault("penalita", []).append(
+            {
+                "id": uuid.uuid4().hex[:8],
+                "pilota": pilota,
+                "tipo": tipo,  # "secondi" oppure "giri"
+                "valore": float(valore),
+                "motivo": motivo.strip(),
+                "ora": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+    _aggiorna(gara_id, fn)
+
+
+def elimina_penalita(gara_id: str, pen_id: str) -> None:
+    def fn(g):
+        g["penalita"] = [p for p in g.get("penalita", []) if p.get("id") != pen_id]
+    _aggiorna(gara_id, fn)
+
+
+@st.dialog("Aggiungi penalità")
+def dialog_penalita(gara_id: str, piloti: list[str]) -> None:
+    if not piloti:
+        st.error("Prima aggiungi i piloti nella scheda gara.")
+        return
+    pilota = st.selectbox("Pilota colpevole", piloti, key=f"pen_pilota_{gara_id}")
+    c1, c2 = st.columns(2)
+    tipo_label = c1.radio("Penalità in", ["Secondi", "Giri"], horizontal=True, key=f"pen_tipo_{gara_id}")
+    valore = c2.number_input("Valore", min_value=1.0, max_value=3600.0, value=10.0, step=1.0, key=f"pen_valore_{gara_id}")
+    motivo = st.text_input("Motivo *", key=f"pen_motivo_{gara_id}", placeholder="Es. taglio di curva, partenza anticipata")
+    if st.button("Salva penalità", type="primary", key=f"pen_salva_{gara_id}"):
+        if not motivo.strip():
+            st.error("Scrivi il motivo della penalità.")
+            return
+        aggiungi_penalita(gara_id, pilota, "giri" if tipo_label == "Giri" else "secondi", valore, motivo)
+        st.rerun()
+
+
 def imposta_pit_sec(gara_id: str, secondi: int) -> None:
     def fn(g):
         piano = g.get("piano") or {}
