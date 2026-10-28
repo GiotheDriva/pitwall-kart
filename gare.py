@@ -170,6 +170,21 @@ def dialog_nuova_gara() -> None:
 # --------------------------------------------------------------------------- #
 # Home: calendario e fatture
 # --------------------------------------------------------------------------- #
+@st.dialog("Elimina gara")
+def dialog_elimina(gara_id: str, nome: str) -> None:
+    st.warning(f"Stai per eliminare **{nome}**. Questa operazione non si può annullare.")
+    st.write("Per confermare, scrivi il nome esatto della gara:")
+    scritto = st.text_input("Nome della gara", key=f"del_nome_{gara_id}", placeholder=nome)
+    if st.button(
+        "Elimina definitivamente",
+        type="primary",
+        key=f"del_ok_{gara_id}",
+        disabled=scritto.strip() != nome.strip(),
+    ):
+        _elimina(gara_id)
+        st.rerun()
+
+
 def render_home() -> None:
     gare = sorted(load_gare(), key=lambda g: g.get("data", ""), reverse=True)
 
@@ -187,7 +202,7 @@ def render_home() -> None:
             st.info("Nessuna gara ancora. Premi **＋ Nuova gara** in alto a destra.")
         for gara in gare:
             with st.container(border=True):
-                c1, c2, c3, c4, c5 = st.columns([3, 2.2, 2, 2, 1])
+                c1, c2, c3, c4, c5, c6 = st.columns([3, 2.2, 2, 2, 1, 0.5])
                 c1.markdown(f"**{gara['nome']}**  \n{gara.get('team', '')} · {gara.get('data', '')}")
                 c2.markdown(f"{formato_tipo(gara)}  \n{len(gara.get('piloti', []))} piloti")
                 c3.markdown(
@@ -198,6 +213,8 @@ def render_home() -> None:
                 if c5.button("Apri", key=f"apri_{gara['id']}"):
                     apri_gara(gara["id"])
                     st.rerun()
+                if c6.button("🗑️", key=f"del_{gara['id']}", help="Elimina questa gara"):
+                    dialog_elimina(gara["id"], gara["nome"])
 
     with tab_fatture:
         render_fatture(gare)
