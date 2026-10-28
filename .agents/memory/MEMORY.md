@@ -1,3 +1,4 @@
-- [Go-kart endurance pit-wall product](go-kart-endurance.md) — live-timing names may be sourced; telemetry and strategy estimates are simulated.
+- [Go-kart endurance pit-wall product](go-kart-endurance.md) — Apex standings, lap counts, and race countdown must be live; keep stint and pit estimates clearly marked.
+- [Apex live-timing stream](apex-live-timing-stream.md) — the page shell has placeholder tables; real standings arrive on Apex's configured WebSocket.
 - [Streamlit preview routing](streamlit-preview-routing.md) — a standalone Streamlit workflow alone does not create this workspace's root web preview.
 - [Resilient timing-table parsing](resilient-timing-table-parsing.md) — parse HTML tables individually so malformed tables do not hide valid driver rows.
