@@ -98,6 +98,8 @@ def euro(value: float | int | None) -> str:
 def formato_tipo(gara: dict) -> str:
     if gara.get("tipo") == "Endurance":
         return f"Endurance · {gara.get('ore') or '—'} h"
+    if gara.get("tipo") == "Noleggio":
+        return f"Noleggio · {gara.get('minuti') or '—'} min"
     return f"Sprint · {gara.get('giri') or '—'} giri"
 
 
@@ -117,11 +119,19 @@ def torna_home() -> None:
 def dialog_nuova_gara() -> None:
     nome = st.text_input("Nome della gara *", key="ng_nome", placeholder="Es. 4 ore di Pomposa")
     c1, c2 = st.columns(2)
-    tipo = c1.radio("Tipo di gara", ["Endurance", "Sprint"], horizontal=True, key="ng_tipo")
-    team = c2.text_input("Nome del team *", key="ng_team")
+    tipo = c1.radio("Tipo di gara", ["Endurance", "Sprint", "Noleggio"], horizontal=True, key="ng_tipo")
+    if tipo == "Noleggio":
+        team = ""  # nel noleggio si partecipa come piloti singoli
+    else:
+        team = c2.text_input("Nome del team *", key="ng_team")
 
     c3, c4 = st.columns(2)
-    if tipo == "Endurance":
+    minuti = None
+    if tipo == "Noleggio":
+        minuti = c3.number_input("Durata (minuti)", min_value=5, max_value=600, value=20, step=5, key="ng_minuti")
+        ore = None
+        giri = None
+    elif tipo == "Endurance":
         ore = c3.number_input("Durata (ore)", min_value=0.5, max_value=24.0, value=4.0, step=0.5, key="ng_ore")
         giri = None
     else:
@@ -131,8 +141,10 @@ def dialog_nuova_gara() -> None:
 
     data_gara = st.date_input("Data della gara", value=date.today(), key="ng_data")
     piloti_txt = st.text_area("Piloti (uno per riga)", key="ng_piloti", height=110)
-    pit_minimo = st.number_input("Pit minimo obbligatorio", min_value=0, max_value=50, value=0, step=1,
-                                 key="ng_pit", help="Numero minimo di soste previste dal regolamento.")
+    pit_minimo = 0
+    if tipo != "Noleggio":
+        pit_minimo = st.number_input("Pit minimo obbligatorio", min_value=0, max_value=50, value=0, step=1,
+                                     key="ng_pit", help="Numero minimo di soste previste dal regolamento.")
     link = st.text_input(
         "Link Live Timing Apex (facoltativo, puoi aggiungerlo dopo)",
         key="ng_link",
@@ -140,7 +152,7 @@ def dialog_nuova_gara() -> None:
     )
 
     if st.button("Crea gara", type="primary", key="ng_crea"):
-        if not nome.strip() or not team.strip():
+        if not nome.strip() or (tipo != "Noleggio" and not team.strip()):
             st.error("Nome della gara e nome del team sono obbligatori.")
             return
         gara = {
@@ -149,6 +161,7 @@ def dialog_nuova_gara() -> None:
             "tipo": tipo,
             "ore": float(ore) if ore is not None else None,
             "giri": int(giri) if giri is not None else None,
+            "minuti": int(minuti) if minuti is not None else None,
             "team": team.strip(),
             "piloti": [p.strip() for p in piloti_txt.splitlines() if p.strip()],
             "quota": float(quota),
@@ -203,7 +216,8 @@ def render_home() -> None:
         for gara in gare:
             with st.container(border=True):
                 c1, c2, c3, c4, c5, c6 = st.columns([3, 2.2, 2, 2, 1, 0.5])
-                c1.markdown(f"**{gara['nome']}**  \n{gara.get('team', '')} · {gara.get('data', '')}")
+                sottotitolo = " · ".join(x for x in [gara.get("team", ""), gara.get("data", "")] if x)
+                c1.markdown(f"**{gara['nome']}**  \n{sottotitolo}")
                 c2.markdown(f"{formato_tipo(gara)}  \n{len(gara.get('piloti', []))} piloti")
                 c3.markdown(
                     f"{euro(gara.get('quota'))}  \n"
@@ -337,7 +351,7 @@ def render_scheda(gara: dict) -> None:
     gid = gara["id"]
     titolo, indietro = st.columns([5, 1.4])
     titolo.title(f"🏁 {gara['nome']}")
-    titolo.caption(f"{gara.get('team', '')} · {gara.get('data', '')} · {formato_tipo(gara)}")
+    titolo.caption(" · ".join(x for x in [gara.get("team", ""), gara.get("data", ""), formato_tipo(gara)] if x))
     indietro.write("")
     if indietro.button("← Calendario", key=f"indietro_{gid}"):
         torna_home()
