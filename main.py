@@ -21,6 +21,10 @@ import websockets
 from bs4 import BeautifulSoup
 import streamlit.components.v1 as components
 
+import pro_tools
+import gare
+import piano
+
 
 st.set_page_config(
     page_title="Pit Wall | Go-Kart Endurance",
@@ -91,6 +95,9 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+gare.route()
 
 
 PILOT_COLUMN_PATTERN = re.compile(
@@ -346,17 +353,44 @@ def parse_apex_int(value: str) -> int | None:
     return int(match.group()) if match else None
 
 
-def parse_apex_frame(frame: str) -> dict:
-    """Convert Apex's live WebSocket messages into a current standings snapshot."""
+def parse_apex_frame(frame: str, state: dict | None = None) -> dict:
+    """Apply one Apex WebSocket message to the persistent standings state.
+
+    Apex sends the full grid once, then only the cells that change, as lines
+    like ``r110096c6|tn|52.716``. ``state`` keeps the whole classification
+    between messages so every update is merged, not replaced.
+    """
+    if state is None:
+        state = {"header": {}, "cells": {}}
+    header: dict[str, str] = state["header"]
+    cells: dict[str, dict[str, str]] = state["cells"]
     fields: dict[str, str] = {}
-    grid_html = ""
+    cell_key = re.compile(r"^(r\d+)(c\d+)$")
+
     for line in frame.splitlines():
         parts = line.split("|", 2)
         if len(parts) < 3:
             continue
         key, value_type, value = parts
         if key == "grid":
-            grid_html = value
+            grid = BeautifulSoup(value, "lxml")
+            head = grid.select_one("tr.head")
+            if head:
+                header.clear()
+                for index, td in enumerate(head.find_all("td", recursive=False), start=1):
+                    header[f"c{index}"] = (td.get("data-type") or "").strip().lower()
+            for tr in grid.select("tr[data-id]"):
+                if "head" in tr.get("class", []):
+                    continue
+                row_id = tr.get("data-id", "")
+                values = {
+                    f"c{index}": td.get_text(" ", strip=True)
+                    for index, td in enumerate(tr.find_all("td", recursive=False), start=1)
+                }
+                cells[row_id] = values
+        elif cell_key.match(key):
+            row_id, col = cell_key.match(key).groups()
+            cells.setdefault(row_id, {})[col] = value.strip()
         elif key in {"title1", "title2"}:
             fields[key] = value.strip()
         elif key == "dyn1":
@@ -364,44 +398,31 @@ def parse_apex_frame(frame: str) -> dict:
             fields["timer_value"] = value.strip()
 
     rows: list[dict] = []
-    if grid_html:
-        grid = BeautifulSoup(grid_html, "lxml")
-        header_row = grid.select_one("tr.head")
-        header_types = (
-            [cell.get("data-type", "").strip().lower() for cell in header_row.find_all("td", recursive=False)]
-            if header_row
-            else []
-        )
-        for row in grid.select("tr[data-id]"):
-            if "head" in row.get("class", []):
-                continue
-            cells = row.find_all("td", recursive=False)
-            values = [cell.get_text(" ", strip=True) for cell in cells]
-            row_fields = {
-                header_types[index]: value
-                for index, value in enumerate(values)
-                if index < len(header_types) and header_types[index]
+    debug_sample: list[tuple[str, str]] = []
+    for row_id, values in cells.items():
+        by_type = {header[col]: text for col, text in values.items() if header.get(col)}
+        if not debug_sample and by_type:
+            debug_sample = [(header.get(col, ""), text) for col, text in values.items()]
+        team = clean_apex_name(by_type.get("dr", ""))
+        position = parse_apex_int(by_type.get("rk", ""))
+        kart = by_type.get("no", "").strip()
+        if not team or (position is None and not kart):
+            continue
+        rows.append(
+            {
+                "id": row_id,
+                "position": position,
+                "kart": kart,
+                "team": team,
+                "last_lap": by_type.get("llp", "").strip(),
+                "gap": by_type.get("gap", "").strip(),
+                "interval": "",
+                "best_lap": by_type.get("blp", "").strip(),
+                "laps_completed": parse_apex_int(by_type.get("tlp", "")),
+                "pits": parse_apex_int(by_type.get("pit", "")),
+                "on_track": by_type.get("otr", "").strip(),
             }
-            team = clean_apex_name(row_fields.get("dr", ""))
-            position = parse_apex_int(row_fields.get("rk", ""))
-            kart = row_fields.get("no", "").strip()
-            if not team or (position is None and not kart):
-                continue
-            rows.append(
-                {
-                    "id": row.get("data-id", ""),
-                    "position": position,
-                    "kart": kart,
-                    "team": team,
-                    "last_lap": row_fields.get("llp", "").strip(),
-                    "gap": row_fields.get("gap", "").strip(),
-                    "interval": row_fields.get("int", "").strip(),
-                    "best_lap": row_fields.get("blp", "").strip(),
-                    "laps_completed": parse_apex_int(row_fields.get("tlp", "")),
-                    "pits": parse_apex_int(row_fields.get("pit", "")),
-                    "on_track": row_fields.get("otr", "").strip(),
-                }
-            )
+        )
 
     timer_seconds = None
     if fields.get("timer_type") in {"countdown", "countdown_text"}:
@@ -411,13 +432,7 @@ def parse_apex_frame(frame: str) -> dict:
         except ValueError:
             timer_seconds = None
 
-    rows.sort(
-        key=lambda item: (
-            item["position"] is None,
-            item["position"] or 0,
-            item["kart"],
-        )
-    )
+    rows.sort(key=lambda item: (item["position"] is None, item["position"] or 0, item["kart"]))
     return {
         "event_title": " · ".join(
             value for value in (fields.get("title1"), fields.get("title2")) if value
@@ -428,6 +443,7 @@ def parse_apex_frame(frame: str) -> dict:
         "remaining_received_at": time.time() if timer_seconds is not None else None,
         "standings_received_at": time.time() if rows else None,
         "pilots": list(dict.fromkeys(row["team"] for row in rows)),
+        "debug": {"sample": [list(item) for item in debug_sample]},
     }
 
 
@@ -448,6 +464,7 @@ def _set_feed_state(feed_key: str, **updates) -> None:
 def _run_apex_feed(feed_key: str, websocket_url: str, stop_event: threading.Event) -> None:
     """Maintain the timing socket outside Streamlit's rerun cycle."""
     registry = apex_feed_registry()
+    grid_state: dict = {"header": {}, "cells": {}}
 
     async def listen() -> None:
         retry_delay = 0.4
@@ -485,12 +502,15 @@ def _run_apex_feed(feed_key: str, websocket_url: str, stop_event: threading.Even
                             if isinstance(message, bytes)
                             else message
                         )
-                        update = parse_apex_frame(frame)
+                        update = parse_apex_frame(frame, grid_state)
                         now = time.time()
                         with registry["lock"]:
                             entry = registry["feeds"].get(feed_key)
                             if entry is None:
                                 return
+                            # Ogni frame conferma che il socket è vivo, anche senza classifica.
+                            entry["last_message_at"] = now
+                            entry["connected"] = True
                             snapshot = entry.get("snapshot") or {
                                 "event_title": "",
                                 "rows": [],
@@ -499,6 +519,9 @@ def _run_apex_feed(feed_key: str, websocket_url: str, stop_event: threading.Even
                                 "standings_received_at": None,
                                 "pilots": [],
                             }
+                            # Conserva l'ultimo campione con righe: i frame solo-timer non lo cancellano.
+                            if (update.get("debug") or {}).get("sample"):
+                                snapshot["debug"] = update["debug"]
                             if update["rows"]:
                                 snapshot["rows"] = update["rows"]
                                 snapshot["pilots"] = update["pilots"]
@@ -517,7 +540,7 @@ def _run_apex_feed(feed_key: str, websocket_url: str, stop_event: threading.Even
                                 if update["rows"]:
                                     entry["ready"].set()
             except Exception as exc:
-                _set_feed_state(connected=False, last_error=str(exc)[:240])
+                _set_feed_state(feed_key, connected=False, last_error=str(exc)[:240])
                 if stop_event.is_set():
                     return
                 await asyncio.sleep(retry_delay)
@@ -526,7 +549,7 @@ def _run_apex_feed(feed_key: str, websocket_url: str, stop_event: threading.Even
     try:
         asyncio.run(listen())
     finally:
-        _set_feed_state(connected=False)
+        _set_feed_state(feed_key, connected=False)
 
 
 def fetch_apex_snapshot(page_url: str, wait_seconds: float = 7) -> dict:
@@ -1220,11 +1243,13 @@ def render_live_dashboard(
 
         update_apex_events(apex_row, snapshot)
         remaining_seconds = update_strategy_timer(max_stint_minutes, alert_minutes)
-        standings_received_at = snapshot.get(
-            "standings_received_at", snapshot.get("received_at", time.time())
+        # Lo stato dipende dall'ultimo frame ricevuto dal socket, non dall'ultima
+        # classifica: Apex invia la classifica solo quando cambia qualcosa.
+        last_frame_at = snapshot.get("last_message_at") or snapshot.get(
+            "received_at", time.time()
         )
-        feed_age = max(0.0, time.time() - standings_received_at)
-        connected = bool(snapshot.get("connected")) and feed_age < 10
+        feed_age = max(0.0, time.time() - last_frame_at)
+        connected = bool(snapshot.get("connected")) and feed_age < 30
         status_class = "" if connected else "stale"
         status_label = "LIVE · CONNESSO" if connected else "LIVE · RICONNESSIONE"
         event_title = html.escape(snapshot.get("event_title") or "Sessione Apex")
@@ -1262,6 +1287,10 @@ def render_live_dashboard(
             unsafe_allow_html=True,
         )
 
+    gara_aperta = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA))
+    if gara_aperta and gara_aperta.get("tipo") == "Endurance":
+        piano.render_card(gara_aperta, race_remaining, gare)
+
     telemetry_col, strategy_col, events_col = st.columns(
         [1.2, 1.0, 1.2], gap="large"
     )
@@ -1270,11 +1299,11 @@ def render_live_dashboard(
         st.subheader("Telemetria")
         if apex_row:
             first_row, second_row = st.columns(2, gap="small")
-        position_delta = (
-            st.session_state.get("_position_delta")
-            if apex_row["position"] is not None
-            else None
-        )
+            position_delta = (
+                st.session_state.get("_position_delta")
+                if apex_row["position"] is not None
+                else None
+            )
             delta_text = (
                 f"{-position_delta:+d} pos"
                 if position_delta not in (None, 0)
@@ -1423,35 +1452,25 @@ def render_live_dashboard(
     if apex_row and snapshot:
         st.divider()
         st.subheader("Classifica live")
-        standings = pd.DataFrame(
-            [
-                {
-                    "Pos": row["position"],
-                    "Kart": row["kart"],
-                    "Pilota / team": row["team"],
-                    "Ultimo giro": row["last_lap"],
-                    "Distacco": "Leader"
-                    if row["position"] == 1
-                    else row["gap"],
-                    "Miglior giro": row["best_lap"],
-                    "Giri": row["laps_completed"],
-                    "Pit": row["pits"],
-                    "Tempo in pista": row["on_track"],
-                }
-                for row in snapshot["rows"]
-            ]
+        field_state = pro_tools.track_field(snapshot["rows"], add_event)
+        st.markdown(
+            pro_tools.standings_html(snapshot["rows"], field_state),
+            unsafe_allow_html=True,
         )
-        st.dataframe(
-            standings,
-            hide_index=True,
-            width="stretch",
-            height=min(460, 40 + len(standings) * 35),
-            column_config={
-                "Pos": st.column_config.NumberColumn("Pos", format="P%d"),
-                "Ultimo giro": st.column_config.TextColumn("Ultimo giro"),
-                "Miglior giro": st.column_config.TextColumn("Miglior giro"),
-            },
-        )
+        with st.expander("Diagnostica feed Apex", expanded=False):
+            st.caption(
+                "Celle ricevute per la prima riga: tipo colonna → testo. "
+                "Se la classifica mostra trattini, questo elenco mostra quale colonna non viene letta."
+            )
+            sample = (snapshot.get("debug") or {}).get("sample") or []
+            if sample:
+                st.dataframe(
+                    pd.DataFrame(sample, columns=["Colonna", "Valore"]),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+            else:
+                st.info("Nessuna riga ricevuta ancora.")
 
 
 def render_analysis(provider: str | None, history_limit: int) -> None:
@@ -1552,9 +1571,30 @@ st.caption(
     "Apex live quando disponibile · strategie e stime sempre identificate"
 )
 
-pit_tab, analysis_tab, notebook_tab = st.tabs(
-    ["🏎️ Pit wall", "📈 Analisi", "📝 Taccuino tecnico"]
+pro_tools.inject_style()
+pit_tab, analysis_tab, planner_tab, sheets_tab, notebook_tab = st.tabs(
+    [
+        "🏎️ Pit wall",
+        "📈 Analisi",
+        "🧭 Pianificatore",
+        "📊 Fogli dati",
+        "📝 Taccuino tecnico",
+    ]
 )
+
+with planner_tab:
+    pro_tools.render_planner(
+        gare.load_gare(),
+        st.session_state.get(gare.VISTA),
+        on_save=gare.salva_piano,
+    )
+
+with sheets_tab:
+    sheet_lap, sheet_boards = st.tabs(["⏱️ Giri", "🎨 Lavagne e schizzi"])
+    with sheet_lap:
+        pro_tools.render_lap_sheet()
+    with sheet_boards:
+        pro_tools.render_boards()
 
 with pit_tab:
     if live_timing and selected_pilot:

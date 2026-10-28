@@ -53,3 +53,8 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+dati_gare.json
+dati_gare.tmp
+apex_frames.txt
+.venv/
+__pycache__/
