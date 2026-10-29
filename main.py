@@ -1492,6 +1492,8 @@ def render_live_dashboard(
                 else "—"
             )
             second_row.metric("Giro in corso", current_lap, apex_row["on_track"] or None)
+            if gara_aperta and gara_aperta.get("tipo") in ("Endurance", "Sprint"):
+                st.metric("Kart ai box", kart_ai_box(pit_stop_seconds))
             st.session_state["_ultimo_pit_apex"] = apex_row.get("last_pit") or ""
             st.caption(
                 f"Kart {apex_row['kart'] or '—'} · pit stop "
@@ -1704,6 +1706,7 @@ def record_fleet(snapshot: dict) -> None:
         pits = row.get("pits")
         if pits is not None:
             if f["prev_soste"] is not None and pits > f["prev_soste"]:
+                f["ai_box_da"] = time.time()  # entrata ai box: resta dentro fino al tempo di sosta
                 f["soste"].append(
                     {"giro": laps, "totale": pits, "durata": row.get("last_pit", ""), "orario": now}
                 )
@@ -1713,6 +1716,17 @@ def record_fleet(snapshot: dict) -> None:
 
 def _mio_kart() -> str:
     return str((st.session_state.get("_apex_mine") or {}).get("kart") or "")
+
+
+def kart_ai_box(tempo_sosta_s: float) -> int:
+    """Kart entrati ai box e non ancora usciti: l'uscita è stimata con il tempo di sosta."""
+    now = time.time()
+    fleet = st.session_state.get("fleet_laps", {})
+    return sum(
+        1
+        for f in fleet.values()
+        if f.get("ai_box_da") and now - f["ai_box_da"] < float(tempo_sosta_s or 0)
+    )
 
 
 def count_penalita_kart(kart: str) -> int:
