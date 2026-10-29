@@ -354,6 +354,32 @@ def parse_apex_int(value: str) -> int | None:
     return int(match.group()) if match else None
 
 
+def tipo_intestazione(testo: str) -> str:
+    """Tipo di colonna Apex dal testo dell'intestazione, quando manca il data-type."""
+    t = " ".join(testo.lower().split())
+    if "tempo pit" in t:
+        return "tpit"
+    if any(p in t for p in ("ultima", "última", "last lap", "ultimo giro")):
+        return "llp"
+    if any(p in t for p in ("mejor", "miglior", "best")):
+        return "blp"
+    if t in ("vueltas", "vuelta", "giri", "laps", "lap") or t.startswith(("vuelt", "giri")):
+        return "tlp"
+    if t in ("pits", "pit", "pit stop", "pits stop") or t.startswith("pit stop"):
+        return "pit"
+    if "gap" in t or "distacco" in t:
+        return "gap"
+    if t in ("kart", "no", "nº", "n°", "#"):
+        return "no"
+    if any(p in t for p in ("piloto", "pilota", "driver")):
+        return "dr"
+    if t in ("clasif.", "clasif", "cla", "pos", "pos.", "rk", "posizione"):
+        return "rk"
+    if "pista" in t or "en pista" in t:
+        return "otr"
+    return ""
+
+
 def parse_apex_comments(value: str) -> list[dict]:
     """Estrae i messaggi della sezione Commenti (campo 'com' di Apex, HTML con <p>)."""
     if not value or not value.strip():
@@ -401,9 +427,9 @@ def parse_apex_frame(frame: str, state: dict | None = None) -> dict:
                 cells.clear()  # griglia completa: elimina le righe delle sessioni precedenti
                 for index, td in enumerate(head.find_all("td", recursive=False), start=1):
                     tipo = (td.get("data-type") or "").strip().lower()
-                    testo = td.get_text(" ", strip=True).lower()
-                    if not tipo and "tempo pit" in testo:
-                        tipo = "tpit"  # colonna "Tempo Pit": Apex non le assegna un data-type
+                    if not tipo:
+                        # Alcune colonne Apex non hanno data-type: le riconosco dal testo (anche in spagnolo).
+                        tipo = tipo_intestazione(td.get_text(" ", strip=True))
                     header[f"c{index}"] = tipo
             for tr in grid.select("tr[data-id]"):
                 if "head" in tr.get("class", []):
