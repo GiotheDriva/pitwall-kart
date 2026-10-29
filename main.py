@@ -6,6 +6,7 @@ import hashlib
 import html
 import io
 import ipaddress
+import json
 import random
 import re
 import socket
@@ -875,6 +876,16 @@ def log_apex_comments(snapshot: dict) -> None:
         icona = "⚠️" if is_penalty_text(item["text"]) else "💬"
         ora = f"{item['time']} · " if item["time"] else ""
         add_event(f"{icona} Apex {ora}{item['text']}")
+        if is_penalty_text(item["text"]):
+            mine = st.session_state.get("_apex_mine") or {}
+            if is_mine(item["text"], mine):
+                notify(f"Penalità del nostro kart: {item['text']}", "penalita")
+            elif mine.get("team") and any(
+                r.get("team") == mine.get("team")
+                and is_mine(item["text"], {"kart": r.get("kart", ""), "team": ""})
+                for r in snapshot.get("rows", [])
+            ):
+                notify(f"Penalità del team: {item['text']}", "team")
     del seen[:-500]
 
 
@@ -894,6 +905,7 @@ def update_apex_events(row: dict, snapshot: dict) -> None:
         ):
             st.session_state["_position_delta"] = row["position"] - previous["position"]
             add_event(f"📊 Posizione live · P{previous['position']} → P{row['position']}")
+            notify(f"Il nostro kart: P{previous['position']} → P{row['position']}", "pos")
         if (
             row["laps_completed"] is not None
             and previous["laps_completed"] is not None
@@ -903,10 +915,12 @@ def update_apex_events(row: dict, snapshot: dict) -> None:
         if row["pits"] is not None and previous["pits"] is not None and row["pits"] > previous["pits"]:
             durata = row.get("last_pit") or "—"
             add_event(f"🛠️ Pit stop registrato · totale {row['pits']} · durata {durata}")
+            notify(f"Pit del nostro kart · durata {durata}", "pit")
         old_best = lap_seconds(previous["best_lap"])
         new_best = lap_seconds(row["best_lap"])
         if new_best is not None and (old_best is None or new_best < old_best):
             add_event(f"⏱️ Best lap Apex · {row['best_lap']} s")
+            notify(f"Nuovo miglior giro del nostro kart: {row['best_lap']} s", "best")
 
     if (
         remaining is not None
@@ -1398,7 +1412,7 @@ def render_live_dashboard(
                 if apex_row["position"] is not None
                 else "—",
                 delta=delta_text,
-                delta_color="inverse",
+                delta_color="normal",
             )
             second_row.metric(
                 "Ultimo giro",
@@ -1795,7 +1809,11 @@ def render_classifica_sotto() -> None:
     st.subheader("Classifica live")
     field_state = pro_tools.track_field(snapshot["rows"], add_event)
     st.markdown(
-        pro_tools.standings_html(snapshot["rows"], field_state),
+        pro_tools.standings_html(
+            snapshot["rows"],
+            field_state,
+            mio_kart=str((st.session_state.get("_apex_mine") or {}).get("kart") or ""),
+        ),
         unsafe_allow_html=True,
     )
     with st.expander("Diagnostica feed Apex", expanded=False):
@@ -1814,7 +1832,98 @@ def render_classifica_sotto() -> None:
             st.info("Nessuna riga ricevuta ancora.")
 
 
-st.title("🏁 Pit Wall Engineering")
+def notify(text: str, kind: str = "info") -> None:
+    """Notifica importante per il nostro kart o il team: compare in alto a destra e resta nella campanella."""
+    items = st.session_state.setdefault("notifiche", [])
+    seq = st.session_state.get("notifiche_seq", 0) + 1
+    st.session_state["notifiche_seq"] = seq
+    items.insert(
+        0,
+        {
+            "id": seq,
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "text": text,
+            "kind": kind,
+            "mostrata": False,
+        },
+    )
+    del items[100:]
+
+
+def _toast_html(items: list[dict]) -> str:
+    """Script che mostra le notifiche nella pagina principale (scorre da destra e sparisce da sola)."""
+    payload = json.dumps(items, ensure_ascii=False).replace("</", "<\\/")
+    return f"""<script>
+(function() {{
+  const items = {payload};
+  try {{
+    const win = window.parent;
+    const doc = win.document;
+    if (!doc.getElementById('pw-toast-style')) {{
+      const s = doc.createElement('style');
+      s.id = 'pw-toast-style';
+      s.textContent = `
+        @keyframes pwIn {{ from {{ transform: translateX(120%); opacity: 0; }} to {{ transform: translateX(0); opacity: 1; }} }}
+        @keyframes pwOut {{ to {{ opacity: 0; transform: translateX(30%); }} }}
+        .pw-toast {{ animation: pwIn .45s ease-out, pwOut .6s ease-in 5.2s forwards;
+          background: #161b22; color: #f0f6fc; border-radius: 10px; padding: 10px 14px;
+          font: 14px system-ui, sans-serif; box-shadow: 0 8px 24px rgba(0,0,0,.45);
+          border-left: 4px solid #f5b400; max-width: 340px; }}
+      `;
+      doc.head.appendChild(s);
+    }}
+    let root = doc.getElementById('pw-toast-root');
+    if (!root) {{
+      root = doc.createElement('div');
+      root.id = 'pw-toast-root';
+      root.style.cssText = 'position:fixed;top:64px;right:16px;z-index:999999;display:flex;flex-direction:column;gap:8px;pointer-events:none;';
+      doc.body.appendChild(root);
+    }}
+    win.__pwSeen = win.__pwSeen || {{}};
+    const colori = {{ penalita: '#ff4b4b', team: '#ffa500', pos: '#21c55d', pit: '#3b82f6', best: '#a855f7' }};
+    for (const it of items) {{
+      if (win.__pwSeen[it.id]) continue;
+      win.__pwSeen[it.id] = true;
+      const d = doc.createElement('div');
+      d.className = 'pw-toast';
+      d.textContent = it.text;
+      d.style.borderLeftColor = colori[it.kind] || '#f5b400';
+      root.appendChild(d);
+      win.setTimeout(() => d.remove(), 6000);
+    }}
+  }} catch (e) {{ console.log('notifiche', e); }}
+}})();
+</script>"""
+
+
+@st.fragment(run_every=2)
+def render_toasts() -> None:
+    items = st.session_state.get("notifiche", [])
+    nuove = [n for n in items if not n.get("mostrata")]
+    if not nuove:
+        return
+    payload = [{"id": n["id"], "text": n["text"], "kind": n["kind"]} for n in reversed(nuove)]
+    for n in nuove:
+        n["mostrata"] = True
+    components.html(_toast_html(payload), height=0)
+
+
+@st.fragment(run_every=5)
+def render_campana() -> None:
+    items = st.session_state.get("notifiche", [])
+    with st.popover(f"🔔 {len(items)}"):
+        st.markdown("**Notifiche · nostro kart e team**")
+        if not items:
+            st.caption("Nessuna notifica ancora.")
+        for n in items[:60]:
+            st.markdown(f"`{n['time']}` · {n['text']}")
+
+
+titolo_col, campana_col = st.columns([6, 1])
+titolo_col.title("🏁 Pit Wall Engineering")
+with campana_col:
+    render_campana()
+render_toasts()
 timing_provider = st.session_state.get("timing_provider")
 st.caption(
     "Centro operativo endurance · "

@@ -747,7 +747,7 @@ PRO_TABLE_CSS = """
 """
 
 
-def standings_html(rows: list[dict], state: dict) -> str:
+def standings_html(rows: list[dict], state: dict, mio_kart: str = "") -> str:
     flashes: dict[str, set[str]] = state.get("flashes", {})
     trends: dict[str, str] = state.get("trends", {})
     session_best = state.get("session_best")
@@ -760,6 +760,7 @@ def standings_html(rows: list[dict], state: dict) -> str:
                 "pw-leader" if row["position"] == 1 else "",
                 "pw-flash-pos" if "position" in flash else "",
                 "pw-flash-lap" if "last_lap" in flash else "",
+                "pw-mio" if mio_kart and str(kart) == str(mio_kart) else "",
             ) if c
         )
         lap_secs = lap_to_seconds(row["last_lap"])
@@ -791,6 +792,7 @@ def standings_html(rows: list[dict], state: dict) -> str:
     )
     return (
         PRO_TABLE_CSS
+        + "<style>.pw-table tr.pw-mio td { background: rgba(250, 204, 21, 0.14) !important; }</style>"
         + '<div class="pw-table-wrap"><table class="pw-table">'
         + f"<thead>{head}</thead><tbody>{''.join(body)}</tbody></table></div>"
         + '<div class="pitwall-note" style="margin-top:0.4rem">'
