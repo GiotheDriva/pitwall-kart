@@ -1461,16 +1461,45 @@ def render_live_dashboard(
             st.metric("Distacco simulato", f"+{st.session_state['_gap']:.1f} s")
             st.caption("Valori dimostrativi · non provengono dal Live Timing.")
 
-    # Lo stint residuo usa lo stesso orologio del countdown gara: parte insieme alla gara
-    # e riparte da zero a ogni pit. Nelle sprint (durata non fissa) resta il timer di sessione.
+    # Stint residuo: se c'è una strategia pinnata dal Pianificatore usa la stessa simulazione
+    # del riquadro "Strategia live" (pit registrati compresi). Altrimenti usa il countdown gara.
     race_total = None
     if gara_aperta and gara_aperta.get("tipo") == "Endurance" and gara_aperta.get("ore"):
         race_total = float(gara_aperta["ore"]) * 3600
     elif gara_aperta and gara_aperta.get("tipo") == "Noleggio" and gara_aperta.get("minuti"):
         race_total = float(gara_aperta["minuti"]) * 60
-    race_elapsed = None
     stint_remaining_s = remaining_seconds
-    if provider == "apex" and race_total and race_remaining is not None:
+    race_elapsed_corrente = None
+    stint_total_s = max(1.0, max_stint_minutes * 60.0)
+    in_sosta = False
+    ripartenza_s = 0.0
+    race_finita = race_remaining is not None and race_remaining <= 0.5
+    plan = gara_aperta.get("piano") if gara_aperta and gara_aperta.get("tipo") == "Endurance" else None
+
+    if plan:
+        durata_plan = float(plan.get("ore") or gara_aperta.get("ore") or 0) * 3600
+        if durata_plan > 0:
+            apex_el = durata_plan - race_remaining if race_remaining is not None else None
+            elapsed_plan = piano.tempo_gara(gara_aperta, apex_el)
+            stints_plan = piano.simula(
+                durata_plan,
+                float(plan["stint_min"]) * 60,
+                float(plan["pit_sec"]),
+                plan.get("piloti", []),
+                [float(t) for t in gara_aperta.get("pit_eseguiti", [])],
+            )
+            attuale = next((s for s in stints_plan if s["inizio"] <= elapsed_plan < s["fine"]), None)
+            prossimo = next((s for s in stints_plan if s["inizio"] > elapsed_plan), None)
+            if elapsed_plan >= durata_plan:
+                race_finita = True
+            elif attuale:
+                stint_remaining_s = attuale["fine"] - elapsed_plan
+                stint_total_s = max(1.0, attuale["fine"] - attuale["inizio"])
+            elif prossimo:
+                in_sosta = True
+                ripartenza_s = max(0.0, prossimo["inizio"] - elapsed_plan)
+                stint_total_s = max(1.0, float(plan["pit_sec"]))
+    elif provider == "apex" and race_total and race_remaining is not None:
         race_elapsed = max(0.0, race_total - race_remaining)
         pits_now = apex_row.get("pits") if apex_row else None
         if pits_now is not None:
@@ -1482,28 +1511,32 @@ def render_live_dashboard(
             0.0,
             max_stint_minutes * 60 - (race_elapsed - st.session_state.get("_stint_offset_s", 0.0)),
         )
-    race_finita = race_remaining is not None and race_remaining <= 0.5
+        race_elapsed_corrente = race_elapsed
+    else:
+        race_elapsed_corrente = None
 
     if not noleggio:
         with strategy_col:
             st.subheader("Stint residuo")
-            stint_total = max(1, max_stint_minutes * 60)
             if race_finita:
                 st.info("Gara terminata")
-            else:
-                elapsed_fraction = min(1.0, max(0.0, 1 - stint_remaining_s / stint_total))
+            elif in_sosta:
                 st.progress(
-                    elapsed_fraction,
+                    min(1.0, max(0.0, 1 - ripartenza_s / stint_total_s)),
+                    text=f"In sosta · nuovo stint tra {format_live_duration(ripartenza_s)}",
+                )
+                st.info("PIT IN CORSO · il nuovo stint parte da solo alla fine della sosta")
+            else:
+                st.progress(
+                    min(1.0, max(0.0, 1 - stint_remaining_s / stint_total_s)),
                     text=f"{format_live_duration(stint_remaining_s)} al cambio",
                 )
-
-            if stint_remaining_s <= alert_minutes * 60:
-                st.error("FINESTRA ROSSA · cambio pilota imminente")
-            elif stint_remaining_s <= (alert_minutes + 5) * 60:
-                st.warning("FINESTRA GIALLA · preparare il prossimo pilota")
-            else:
-                st.success("FINESTRA VERDE · stint regolare")
-
+                if stint_remaining_s <= alert_minutes * 60:
+                    st.error("FINESTRA ROSSA · cambio pilota imminente")
+                elif stint_remaining_s <= (alert_minutes + 5) * 60:
+                    st.warning("FINESTRA GIALLA · preparare il prossimo pilota")
+                else:
+                    st.success("FINESTRA VERDE · stint regolare")
             st.markdown("**Rientro stimato dopo il pit stop**")
             if apex_row and snapshot:
                 predicted_position = estimate_apex_rejoin_position(
@@ -1554,7 +1587,7 @@ def render_live_dashboard(
         pit_col, flag_col, traffic_col, issue_col = st.columns(4)
         if pit_col.button("🛠️ PIT IN", use_container_width=True):
             st.session_state["_stint_started_at"] = time.time()
-            st.session_state["_stint_offset_s"] = race_elapsed or 0.0
+            st.session_state["_stint_offset_s"] = race_elapsed_corrente or 0.0
             st.session_state["_five_minute_logged"] = False
             st.session_state["_stint_end_logged"] = False
             next_driver = st.session_state.get("next_driver", "").strip()
