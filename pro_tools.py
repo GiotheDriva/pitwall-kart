@@ -63,19 +63,68 @@ def kpi_row(items: list[tuple[str, str, str]]) -> None:
 # --------------------------------------------------------------------------- #
 # 1. Pianificatore strategia endurance
 # --------------------------------------------------------------------------- #
-def build_stints(race_minutes: int, stint_minutes: int, pit_seconds: int) -> list[dict]:
-    """Ritorna gli stint con inizio/fine in minuti di gara, e le soste fra loro."""
+def build_stints(
+    race_minutes: int,
+    stint_minutes: int,
+    pit_seconds: int,
+    extra_pit: dict[int, float] | None = None,
+) -> list[dict]:
+    """Ritorna gli stint con inizio/fine in minuti di gara, e le soste fra loro.
+
+    extra_pit: secondi aggiuntivi da scontare nella sosta che segue lo stint n (chiave = n).
+    """
     stints: list[dict] = []
     cursor = 0.0
     index = 1
     while cursor < race_minutes - 1e-6:
         end = min(cursor + stint_minutes, race_minutes)
         stints.append({"stint": index, "inizio": cursor, "fine": end, "durata": end - cursor})
-        cursor = end + pit_seconds / 60
+        cursor = end + (pit_seconds + (extra_pit or {}).get(index, 0)) / 60
         index += 1
         if index > 500:  # protezione da input assurdi
             break
     return stints
+
+
+def secondi_penalita(penalita: dict, tempo_giro: float = 46.0) -> float:
+    """Converte una penalità in secondi: le penalità a giri usano il tempo medio giro."""
+    valore = float(penalita.get("valore") or 0)
+    return valore * tempo_giro if penalita.get("tipo") == "giri" else valore
+
+
+def descrivi_penalita(penalita: dict) -> str:
+    unita = "giri" if penalita.get("tipo") == "giri" else "s"
+    return f"{float(penalita.get('valore') or 0):g} {unita}"
+
+
+def assegna_penalita(
+    penalita: list[dict],
+    stints: list[dict],
+    roster: list[str],
+    tempo_giro: float,
+) -> tuple[dict[int, float], list[dict]]:
+    """Ogni penalità si sconta alla sosta del pilota colpevole nel piano, in ordine cronologico."""
+    extra: dict[int, float] = {}
+    righe: list[dict] = []
+    usate: dict[str, int] = {}
+    for pen in sorted(penalita, key=lambda p: p.get("ora", "")):
+        pilota = pen.get("pilota", "")
+        turni = [s["stint"] for s in stints if roster[(s["stint"] - 1) % len(roster)] == pilota]
+        riga = {
+            "Pilota": pilota,
+            "Penalità": descrivi_penalita(pen),
+            "Motivo": pen.get("motivo", ""),
+        }
+        if not turni:
+            riga["Scontata dopo lo stint"] = "pilota non nel piano"
+        else:
+            k = usate.get(pilota, 0)
+            stint_n = turni[min(k, len(turni) - 1)]
+            usate[pilota] = k + 1
+            extra[stint_n] = extra.get(stint_n, 0) + secondi_penalita(pen, tempo_giro)
+            riga["Scontata dopo lo stint"] = stint_n
+        righe.append(riga)
+    return extra, righe
 
 
 def render_planner(
@@ -128,12 +177,22 @@ def render_planner(
         key=f"pl_roster_{gid}",
     )
     roster = [r.strip() for r in roster_text.splitlines() if r.strip()] or ["Pilota 1"]
+    tempo_giro = st.number_input(
+        "Tempo medio giro (s), usato per le penalità a giri",
+        20.0, 120.0, 46.0, 0.5, key=f"pl_giro_{gid}",
+    )
 
     race_min = race_hours * 60
     stints = build_stints(int(race_min), int(stint_min), int(pit_sec))
     if not stints:
         st.info("Imposta una durata valida.")
         return
+
+    # Le penalità del calendario si scontano nelle soste dei piloti colpevoli.
+    penalita = gara.get("penalita", []) if gara else []
+    extra_pit, penalty_rows = assegna_penalita(penalita, stints, roster, tempo_giro)
+    if extra_pit:
+        stints = build_stints(int(race_min), int(stint_min), int(pit_sec), extra_pit)
 
     rows = []
     for s in stints:
@@ -146,6 +205,7 @@ def render_planner(
                 "Fine (min)": round(s["fine"], 1),
                 "Durata (min)": round(s["durata"], 1),
                 "Sosta dopo": "Sì" if s["stint"] < len(stints) else "—",
+                "Penalità in sosta (s)": int(extra_pit.get(s["stint"], 0)),
                 "Note": "",
                 "_ok": s["durata"] >= min_stint_min,
             }
@@ -163,7 +223,11 @@ def render_planner(
         [
             ("Stint totali", str(len(stints)), f"{planned_pits} soste"),
             ("Pit obbligatori", pit_status, pit_note),
-            ("Tempo sosta totale", f"{planned_pits * pit_sec / 60:.1f} min", "somma delle soste"),
+            (
+                "Tempo sosta totale",
+                f"{(planned_pits * pit_sec + sum(extra_pit.values())) / 60:.1f} min",
+                f"soste + {sum(extra_pit.values()):.0f} s di penalità" if extra_pit else "somma delle soste",
+            ),
             ("Pilota con più tempo", plan.groupby("Pilota")["Durata (min)"].sum().idxmax(),
              f"{plan.groupby('Pilota')['Durata (min)'].sum().max():.0f} min totali"),
         ]
@@ -177,6 +241,13 @@ def render_planner(
             f"Per fare almeno {pit_min} pit servono {stints_needed} stint: "
             f"la durata massima di ciascuno è {max_stint:.1f} min."
         )
+
+    if penalty_rows:
+        st.markdown("**Penalità da scontare ai box**")
+        st.dataframe(pd.DataFrame(penalty_rows), hide_index=True, use_container_width=True)
+        non_nel_piano = [r for r in penalty_rows if isinstance(r["Scontata dopo lo stint"], str)]
+        if non_nel_piano:
+            st.warning("Alcune penalità riguardano piloti non presenti nel piano: controlla il nome nella scheda gara.")
 
     if gara and on_save:
         piano_salvato = {
@@ -221,7 +292,7 @@ def render_planner(
         plan.drop(columns=["_ok"]),
         hide_index=True,
         use_container_width=True,
-        disabled=["Stint", "Inizio (min)", "Fine (min)", "Durata (min)", "Sosta dopo"],
+        disabled=["Stint", "Inizio (min)", "Fine (min)", "Durata (min)", "Sosta dopo", "Penalità in sosta (s)"],
         column_config={
             "Pilota": st.column_config.SelectboxColumn("Pilota", options=roster, required=True),
             "Note": st.column_config.TextColumn("Note", width="large"),
