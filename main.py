@@ -1530,6 +1530,8 @@ def render_live_dashboard(
     if gara_in_attesa:
         st.session_state["_stint_started_at"] = time.time()
     plan = gara_aperta.get("piano") if gara_aperta and gara_aperta.get("tipo") == "Endurance" else None
+    if plan and "stint_min" not in plan:
+        plan = None  # piano incompleto (es. solo tempo di sosta): trattalo come assente
 
     if plan:
         durata_plan = float(plan.get("ore") or gara_aperta.get("ore") or 0) * 3600

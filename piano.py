@@ -107,7 +107,7 @@ def render_card(gara: dict, race_remaining: float | None, azioni) -> None:
             help="Se attivo, il tempo di gara arriva dal conto alla rovescia di Apex.",
         )
 
-    if not piano or durata_s <= 0:
+    if not piano or "stint_min" not in piano or durata_s <= 0:
         st.info(
             "Imposta la strategia nel **Pianificatore** e premi "
             "**📌 Usa questo piano per il muretto** per vedere chi è in pista."

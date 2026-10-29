@@ -387,10 +387,14 @@ def render_home() -> None:
                     f"{euro(gara.get('quota'))}  \n"
                     + ("✅ Pagata" if gara.get("pagata") else "⏳ Da pagare")
                 )
-                c4.markdown("🟢 Live Timing collegato" if gara.get("link") else "⚪ Nessun link")
-                if c5.button("Apri", key=f"apri_{gara['id']}"):
-                    apri_gara(gara["id"])
-                    st.rerun()
+                if gara.get("stato") == "conclusa":
+                    c4.markdown("🏁 **Gara conclusa**")
+                    c5.write("")  # niente "Apri": la gara è chiusa, resta solo il report (ℹ️)
+                else:
+                    c4.markdown("🟢 Live Timing collegato" if gara.get("link") else "⚪ Nessun link")
+                    if c5.button("Apri", key=f"apri_{gara['id']}"):
+                        apri_gara(gara["id"])
+                        st.rerun()
                 if c6.button("ℹ️", key=f"info_{gara['id']}", help="Report della gara"):
                     st.session_state[VISTA] = f"report:{gara['id']}"
                     st.rerun()
@@ -719,7 +723,9 @@ def dialog_penalita(gara_id: str, piloti: list[str]) -> None:
 
 def imposta_pit_sec(gara_id: str, secondi: int) -> None:
     def fn(g):
-        piano = g.get("piano") or {}
-        piano["pit_sec"] = float(secondi)
-        g["piano"] = piano
+        piano = g.get("piano")
+        # Senza un piano completo non creo un piano parziale: il muretto lo leggerebbe come valido.
+        if piano and "stint_min" in piano:
+            piano["pit_sec"] = float(secondi)
+            g["piano"] = piano
     _aggiorna(gara_id, fn)
