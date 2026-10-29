@@ -115,6 +115,9 @@ def render_card(gara: dict, race_remaining: float | None, azioni) -> None:
         _controlli(gara, elapsed, durata_s, None, azioni)
         return
 
+    if elapsed <= 0:
+        st.info("In attesa del via: la strategia parte quando parte la gara (Avvia gara o countdown Apex).")
+
     pit_manuali = [float(t) for t in gara.get("pit_eseguiti", [])]
     stints = simula(durata_s, float(piano["stint_min"]) * 60, float(piano["pit_sec"]),
                     piano.get("piloti", []), pit_manuali)

@@ -799,6 +799,21 @@ def start_apex_session(pilot: str) -> None:
     st.session_state["_last_apex_remaining"] = None
 
 
+def _gara_avviata(gara: dict | None, race_remaining: float | None) -> bool:
+    """True quando la gara è partita: countdown Apex in calo oppure cronometro del muretto attivo.
+
+    Per Sprint o senza gara aperta non c'è un via da aspettare: resta il timer di sessione.
+    """
+    if not gara or gara.get("tipo") not in ("Endurance", "Noleggio"):
+        return True
+    if gara.get("tipo") == "Noleggio":
+        durata = float(gara.get("minuti") or 0) * 60
+    else:
+        durata = float((gara.get("piano") or {}).get("ore") or gara.get("ore") or 0) * 3600
+    apex_el = durata - race_remaining if race_remaining is not None and durata > 0 else None
+    return piano.tempo_gara(gara, apex_el) > 1.0
+
+
 def update_strategy_timer(max_stint_minutes: int, alert_minutes: int = 5) -> float:
     now = time.time()
     remaining = max(
@@ -1509,6 +1524,11 @@ def render_live_dashboard(
     in_sosta = False
     ripartenza_s = 0.0
     race_finita = race_remaining is not None and race_remaining <= 0.5
+    # Lo stint parte solo quando parte la gara (countdown Apex o cronometro del muretto).
+    # Finché non parte, il timer di sessione resta a zero e lo stint non scende.
+    gara_in_attesa = bool(race_total) and not race_finita and not _gara_avviata(gara_aperta, race_remaining)
+    if gara_in_attesa:
+        st.session_state["_stint_started_at"] = time.time()
     plan = gara_aperta.get("piano") if gara_aperta and gara_aperta.get("tipo") == "Endurance" else None
 
     if plan:
@@ -1555,6 +1575,9 @@ def render_live_dashboard(
             st.subheader("Stint residuo")
             if race_finita:
                 st.info("Gara terminata")
+            elif gara_in_attesa:
+                st.progress(0.0, text="Gara non ancora partita · lo stint parte con il via")
+                st.info("IN ATTESA DEL VIA · il conto parte quando parte la gara")
             elif in_sosta:
                 st.progress(
                     min(1.0, max(0.0, 1 - ripartenza_s / stint_total_s)),
