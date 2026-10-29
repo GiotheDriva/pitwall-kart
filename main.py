@@ -353,6 +353,26 @@ def parse_apex_int(value: str) -> int | None:
     return int(match.group()) if match else None
 
 
+def parse_apex_comments(value: str) -> list[dict]:
+    """Estrae i messaggi della sezione Commenti (campo 'com' di Apex, HTML con <p>)."""
+    if not value or not value.strip():
+        return []
+    soup = BeautifulSoup(value, "lxml")
+    comments: list[dict] = []
+    for p in soup.find_all("p"):
+        ora = p.b.get_text(strip=True) if p.b else ""
+        testo = p.get_text(" ", strip=True)
+        if ora and testo.startswith(ora):
+            testo = testo[len(ora):].strip()
+        if testo:
+            comments.append({"time": ora, "text": testo})
+    if not soup.find("p"):
+        testo = soup.get_text(" ", strip=True)
+        if testo:
+            comments.append({"time": "", "text": testo})
+    return comments
+
+
 def parse_apex_frame(frame: str, state: dict | None = None) -> dict:
     """Apply one Apex WebSocket message to the persistent standings state.
 
@@ -377,8 +397,13 @@ def parse_apex_frame(frame: str, state: dict | None = None) -> dict:
             head = grid.select_one("tr.head")
             if head:
                 header.clear()
+                cells.clear()  # griglia completa: elimina le righe delle sessioni precedenti
                 for index, td in enumerate(head.find_all("td", recursive=False), start=1):
-                    header[f"c{index}"] = (td.get("data-type") or "").strip().lower()
+                    tipo = (td.get("data-type") or "").strip().lower()
+                    testo = td.get_text(" ", strip=True).lower()
+                    if not tipo and "tempo pit" in testo:
+                        tipo = "tpit"  # colonna "Tempo Pit": Apex non le assegna un data-type
+                    header[f"c{index}"] = tipo
             for tr in grid.select("tr[data-id]"):
                 if "head" in tr.get("class", []):
                     continue
@@ -391,6 +416,8 @@ def parse_apex_frame(frame: str, state: dict | None = None) -> dict:
         elif cell_key.match(key):
             row_id, col = cell_key.match(key).groups()
             cells.setdefault(row_id, {})[col] = value.strip()
+        elif key == "com":
+            fields["com"] = value
         elif key in {"title1", "title2"}:
             fields[key] = value.strip()
         elif key == "dyn1":
@@ -420,6 +447,7 @@ def parse_apex_frame(frame: str, state: dict | None = None) -> dict:
                 "best_lap": by_type.get("blp", "").strip(),
                 "laps_completed": parse_apex_int(by_type.get("tlp", "")),
                 "pits": parse_apex_int(by_type.get("pit", "")),
+                "last_pit": by_type.get("tpit", "").strip(),
                 "on_track": by_type.get("otr", "").strip(),
             }
         )
@@ -443,6 +471,7 @@ def parse_apex_frame(frame: str, state: dict | None = None) -> dict:
         "remaining_received_at": time.time() if timer_seconds is not None else None,
         "standings_received_at": time.time() if rows else None,
         "pilots": list(dict.fromkeys(row["team"] for row in rows)),
+        "comments": parse_apex_comments(fields.get("com", "")),
         "debug": {"sample": [list(item) for item in debug_sample]},
     }
 
@@ -528,10 +557,23 @@ def _run_apex_feed(feed_key: str, websocket_url: str, stop_event: threading.Even
                                 snapshot["standings_received_at"] = now
                             if update["event_title"]:
                                 snapshot["event_title"] = update["event_title"]
+                            if update.get("comments"):
+                                commenti = snapshot.setdefault("comments", [])
+                                noti = {(c["time"], c["text"]) for c in commenti}
+                                for item in update["comments"]:
+                                    if (item["time"], item["text"]) not in noti:
+                                        commenti.append(item)
+                                        noti.add((item["time"], item["text"]))
+                                del commenti[:-200]
                             if update["remaining_seconds"] is not None:
                                 snapshot["remaining_seconds"] = update["remaining_seconds"]
                                 snapshot["remaining_received_at"] = now
-                            if update["rows"] or update["event_title"] or update["remaining_seconds"] is not None:
+                            if (
+                                update["rows"]
+                                or update["event_title"]
+                                or update["remaining_seconds"] is not None
+                                or update.get("comments")
+                            ):
                                 snapshot["received_at"] = now
                                 entry["snapshot"] = snapshot
                                 entry["last_message_at"] = now
@@ -696,6 +738,7 @@ def start_strategy_session(pilot: str, start_message: str) -> None:
     st.session_state["_five_minute_logged"] = False
     st.session_state["_stint_end_logged"] = False
     st.session_state["events"] = []
+    st.session_state["_seen_apex_comments"] = []
     st.session_state["apex_history"] = []
     st.session_state["simulation_history"] = []
     st.session_state["_position_delta"] = None
@@ -805,7 +848,40 @@ def record_apex_history(row: dict, previous: dict | None) -> None:
     del history[:-300]
 
 
+PENALTY_WORDS = ("penal", "sanzion", "ammonizion", "avviso", "warning", "attenzione", "stop and go", "drive through")
+
+
+def is_penalty_text(text: str) -> bool:
+    low = text.lower()
+    return any(word in low for word in PENALTY_WORDS)
+
+
+def is_mine(text: str, mine: dict) -> bool:
+    kart = str(mine.get("kart") or "").strip()
+    team = str(mine.get("team") or "").strip()
+    if kart and re.search(rf"(?<!\d){re.escape(kart)}(?!\d)", text):
+        return True
+    return bool(team) and team.lower() in text.lower()
+
+
+def log_apex_comments(snapshot: dict) -> None:
+    """Scrive nel Registro eventi ogni messaggio della sezione Commenti, una sola volta."""
+    seen = st.session_state.setdefault("_seen_apex_comments", [])
+    for item in snapshot.get("comments", []):
+        key = f"{item['time']}|{item['text']}"
+        if key in seen:
+            continue
+        seen.append(key)
+        icona = "⚠️" if is_penalty_text(item["text"]) else "💬"
+        ora = f"{item['time']} · " if item["time"] else ""
+        add_event(f"{icona} Apex {ora}{item['text']}")
+    del seen[:-500]
+
+
 def update_apex_events(row: dict, snapshot: dict) -> None:
+    st.session_state["_apex_mine"] = {"kart": row.get("kart", ""), "team": row.get("team", "")}
+    st.session_state["_apex_comments"] = list(snapshot.get("comments", []))
+    log_apex_comments(snapshot)
     previous = st.session_state.get("_last_apex_row")
     remaining = snapshot.get("remaining_seconds")
     previous_remaining = st.session_state.get("_last_apex_remaining")
@@ -825,7 +901,8 @@ def update_apex_events(row: dict, snapshot: dict) -> None:
         ):
             add_event(f"🏎️ Giro completato · {row['laps_completed']} giri")
         if row["pits"] is not None and previous["pits"] is not None and row["pits"] > previous["pits"]:
-            add_event(f"🛠️ Pit stop registrato · totale {row['pits']}")
+            durata = row.get("last_pit") or "—"
+            add_event(f"🛠️ Pit stop registrato · totale {row['pits']} · durata {durata}")
         old_best = lap_seconds(previous["best_lap"])
         new_best = lap_seconds(row["best_lap"])
         if new_best is not None and (old_best is None or new_best < old_best):
@@ -1242,6 +1319,7 @@ def render_live_dashboard(
             return
 
         update_apex_events(apex_row, snapshot)
+        record_fleet(snapshot)
         remaining_seconds = update_strategy_timer(max_stint_minutes, alert_minutes)
         # Lo stato dipende dall'ultimo frame ricevuto dal socket, non dall'ultima
         # classifica: Apex invia la classifica solo quando cambia qualcosa.
@@ -1291,9 +1369,14 @@ def render_live_dashboard(
     if gara_aperta and gara_aperta.get("tipo") == "Endurance":
         piano.render_card(gara_aperta, race_remaining, gare)
 
-    telemetry_col, strategy_col, events_col = st.columns(
-        [1.2, 1.0, 1.2], gap="large"
-    )
+    noleggio = st.session_state.get("_tipo_gara") == "Noleggio"
+    if noleggio:
+        telemetry_col, events_col = st.columns([1.2, 1.2], gap="large")
+        strategy_col = None
+    else:
+        telemetry_col, strategy_col, events_col = st.columns(
+            [1.2, 1.0, 1.2], gap="large"
+        )
 
     with telemetry_col:
         st.subheader("Telemetria")
@@ -1343,9 +1426,11 @@ def render_live_dashboard(
                 else "—"
             )
             second_row.metric("Giro in corso", current_lap)
+            st.session_state["_ultimo_pit_apex"] = apex_row.get("last_pit") or ""
             st.caption(
                 f"Kart {apex_row['kart'] or '—'} · pit stop "
                 f"{apex_row['pits'] if apex_row['pits'] is not None else '—'} · "
+                f"ultimo pit {apex_row.get('last_pit') or '—'} · "
                 f"tempo in pista {apex_row['on_track'] or '—'}"
             )
             if race_remaining is not None:
@@ -1357,49 +1442,50 @@ def render_live_dashboard(
             st.metric("Distacco simulato", f"+{st.session_state['_gap']:.1f} s")
             st.caption("Valori dimostrativi · non provengono dal Live Timing.")
 
-    with strategy_col:
-        st.subheader("Strategia")
-        stint_total = max(1, max_stint_minutes * 60)
-        elapsed_fraction = min(1.0, max(0.0, 1 - remaining_seconds / stint_total))
-        st.progress(
-            elapsed_fraction,
-            text=f"Stint · {format_live_duration(remaining_seconds)} al cambio",
-        )
+    if not noleggio:
+        with strategy_col:
+            st.subheader("Strategia")
+            stint_total = max(1, max_stint_minutes * 60)
+            elapsed_fraction = min(1.0, max(0.0, 1 - remaining_seconds / stint_total))
+            st.progress(
+                elapsed_fraction,
+                text=f"Stint · {format_live_duration(remaining_seconds)} al cambio",
+            )
 
-        if remaining_seconds <= alert_minutes * 60:
-            st.error("FINESTRA ROSSA · cambio pilota imminente")
-        elif remaining_seconds <= (alert_minutes + 5) * 60:
-            st.warning("FINESTRA GIALLA · preparare il prossimo pilota")
-        else:
-            st.success("FINESTRA VERDE · stint regolare")
+            if remaining_seconds <= alert_minutes * 60:
+                st.error("FINESTRA ROSSA · cambio pilota imminente")
+            elif remaining_seconds <= (alert_minutes + 5) * 60:
+                st.warning("FINESTRA GIALLA · preparare il prossimo pilota")
+            else:
+                st.success("FINESTRA VERDE · stint regolare")
 
-        st.markdown("**Rientro stimato dopo il pit stop**")
-        if apex_row and snapshot:
-            predicted_position = estimate_apex_rejoin_position(
-                apex_row,
-                snapshot["rows"],
-                pit_stop_seconds,
-            )
-            st.metric(
-                "Posizione prevista",
-                f"P{predicted_position}" if predicted_position is not None else "Non stimabile",
-            )
-            st.caption(
-                f"Stima dai distacchi live · pit impostato a {pit_stop_seconds} s. "
-                "Non include traffico o kart a un giro di distanza."
-            )
-        else:
-            estimated_laps_lost = max(1, round(pit_stop_seconds / 46))
-            predicted_position = min(
-                20,
-                st.session_state["_position"] + estimated_laps_lost,
-            )
-            st.metric("Posizione prevista", f"P{predicted_position}")
-            st.caption(
-                f"Stima simulata: +{estimated_laps_lost} posizioni "
-                f"(pit stop {pit_stop_seconds} s)."
-            )
-        st.caption(f"Avviso personalizzato a {alert_minutes} min dal cambio.")
+            st.markdown("**Rientro stimato dopo il pit stop**")
+            if apex_row and snapshot:
+                predicted_position = estimate_apex_rejoin_position(
+                    apex_row,
+                    snapshot["rows"],
+                    pit_stop_seconds,
+                )
+                st.metric(
+                    "Posizione prevista",
+                    f"P{predicted_position}" if predicted_position is not None else "Non stimabile",
+                )
+                st.caption(
+                    f"Stima dai distacchi live · pit impostato a {pit_stop_seconds} s. "
+                    "Non include traffico o kart a un giro di distanza."
+                )
+            else:
+                estimated_laps_lost = max(1, round(pit_stop_seconds / 46))
+                predicted_position = min(
+                    20,
+                    st.session_state["_position"] + estimated_laps_lost,
+                )
+                st.metric("Posizione prevista", f"P{predicted_position}")
+                st.caption(
+                    f"Stima simulata: +{estimated_laps_lost} posizioni "
+                    f"(pit stop {pit_stop_seconds} s)."
+                )
+            st.caption(f"Avviso personalizzato a {alert_minutes} min dal cambio.")
 
     with events_col:
         st.subheader("Registro eventi")
@@ -1449,28 +1535,162 @@ def render_live_dashboard(
             else:
                 st.warning("Scrivi una nota prima di registrarla.")
 
-    if apex_row and snapshot:
-        st.divider()
-        st.subheader("Classifica live")
-        field_state = pro_tools.track_field(snapshot["rows"], add_event)
-        st.markdown(
-            pro_tools.standings_html(snapshot["rows"], field_state),
-            unsafe_allow_html=True,
+def record_fleet(snapshot: dict) -> None:
+    """Storico giro per giro di tutti i kart in pista, usato da Analisi e Confronto."""
+    fleet = st.session_state.setdefault("fleet_laps", {})
+    now = datetime.now().strftime("%H:%M:%S")
+    for row in snapshot.get("rows", []):
+        key = str(row.get("kart") or row.get("id") or "").strip()
+        if not key:
+            continue
+        f = fleet.setdefault(
+            key,
+            {"kart": key, "team": "", "giri": [], "soste": [], "prev_giri": None, "prev_soste": None},
         )
-        with st.expander("Diagnostica feed Apex", expanded=False):
-            st.caption(
-                "Celle ricevute per la prima riga: tipo colonna → testo. "
-                "Se la classifica mostra trattini, questo elenco mostra quale colonna non viene letta."
-            )
-            sample = (snapshot.get("debug") or {}).get("sample") or []
-            if sample:
-                st.dataframe(
-                    pd.DataFrame(sample, columns=["Colonna", "Valore"]),
-                    hide_index=True,
-                    use_container_width=True,
+        f["team"] = row.get("team", "") or f["team"]
+        laps = row.get("laps_completed")
+        if laps is not None:
+            if f["prev_giri"] is not None and laps > f["prev_giri"]:
+                f["giri"].append(
+                    {
+                        "giro": laps,
+                        "tempo_s": lap_seconds(row.get("last_lap", "")),
+                        "posizione": row.get("position"),
+                        "distacco_s": gap_seconds(row.get("gap", ""), row.get("position", 0)),
+                        "orario": now,
+                    }
                 )
-            else:
-                st.info("Nessuna riga ricevuta ancora.")
+                del f["giri"][:-400]
+            f["prev_giri"] = laps
+        pits = row.get("pits")
+        if pits is not None:
+            if f["prev_soste"] is not None and pits > f["prev_soste"]:
+                f["soste"].append(
+                    {"giro": laps, "totale": pits, "durata": row.get("last_pit", ""), "orario": now}
+                )
+                del f["soste"][:-100]
+            f["prev_soste"] = pits
+
+
+def _mio_kart() -> str:
+    return str((st.session_state.get("_apex_mine") or {}).get("kart") or "")
+
+
+def count_penalita_kart(kart: str) -> int:
+    commenti = st.session_state.get("_apex_comments", [])
+    return sum(
+        1 for c in commenti
+        if is_penalty_text(c["text"]) and is_mine(c["text"], {"kart": kart, "team": ""})
+    )
+
+
+def render_analisi_kart() -> None:
+    """Analisi del proprio kart: giro per giro, passo del team, distacco e soste."""
+    fleet = st.session_state.get("fleet_laps", {})
+    mio = _mio_kart()
+    f = fleet.get(mio)
+    st.divider()
+    st.markdown(f"#### Analisi del kart {mio or '—'}")
+    if not f or not f["giri"]:
+        st.caption("Nessun giro completato ancora.")
+        return
+
+    giri = pd.DataFrame(f["giri"])
+    st.markdown("**Giro per giro**")
+    st.dataframe(giri, hide_index=True, use_container_width=True)
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        st.markdown("**Distacco dal leader**")
+        serie = giri.dropna(subset=["distacco_s"])
+        if len(serie):
+            st.line_chart(serie.set_index("giro")[["distacco_s"]], y_label="Secondi", height=260)
+        else:
+            st.caption("Distacco non disponibile.")
+    with right:
+        st.markdown("**Passo medio dei kart del team**")
+        team = f.get("team", "")
+        passi = []
+        for k, v in fleet.items():
+            tempi = [g["tempo_s"] for g in v["giri"] if g.get("tempo_s")]
+            if team and v.get("team") == team and tempi:
+                passi.append({"Kart": k, "Passo medio (s)": round(sum(tempi) / len(tempi), 3)})
+        if passi:
+            st.bar_chart(pd.DataFrame(passi).set_index("Kart"), y_label="Secondi", height=260)
+        else:
+            st.caption("Nessun altro kart del team con giri registrati.")
+
+    st.markdown("**Pit e tempo in sosta**")
+    if f["soste"]:
+        st.dataframe(pd.DataFrame(f["soste"]), hide_index=True, use_container_width=True)
+    else:
+        st.caption("Nessuna sosta registrata.")
+
+
+@st.fragment(run_every=5)
+def render_confronto() -> None:
+    """Confronto tra tutti i kart in pista: giri, giro più veloce, soste e penalità."""
+    fleet = st.session_state.get("fleet_laps", {})
+    st.subheader("Confronto kart")
+    if not fleet:
+        st.info("Avvia il Live Timing: qui compaiono i giri di tutti i kart in pista.")
+        return
+
+    opzioni = {k: f"Kart {k} · {v.get('team') or 'pilota singolo'}" for k, v in fleet.items()}
+    mio = _mio_kart()
+    default = [mio] if mio in opzioni else list(opzioni)[:2]
+    scelti = st.multiselect(
+        "Kart da confrontare",
+        list(opzioni),
+        default=default,
+        format_func=lambda k: opzioni[k],
+        key="confronto_kart",
+    )
+    if not scelti:
+        st.caption("Seleziona almeno un kart.")
+        return
+
+    righe = []
+    for k in scelti:
+        v = fleet[k]
+        tempi = [g["tempo_s"] for g in v["giri"] if g.get("tempo_s")]
+        righe.append(
+            {
+                "Kart": k,
+                "Team / pilota": v.get("team") or "—",
+                "Giri": v.get("prev_giri") or 0,
+                "Giro più veloce (s)": round(min(tempi), 3) if tempi else None,
+                "Giro medio (s)": round(sum(tempi) / len(tempi), 3) if tempi else None,
+                "Ultimo giro (s)": round(tempi[-1], 3) if tempi else None,
+                "Soste": v.get("prev_soste") or 0,
+                "Ultima sosta": v["soste"][-1]["durata"] if v["soste"] else "—",
+                "Penalità Apex": count_penalita_kart(k),
+            }
+        )
+    st.markdown("**Riepilogo**")
+    st.dataframe(pd.DataFrame(righe), hide_index=True, use_container_width=True)
+
+    serie: dict[int, dict[str, float]] = {}
+    for k in scelti:
+        for g in fleet[k]["giri"]:
+            if g.get("tempo_s"):
+                serie.setdefault(g["giro"], {})[f"Kart {k}"] = g["tempo_s"]
+    st.markdown("**Giri affiancati (secondi per giro)**")
+    if serie:
+        tabella = pd.DataFrame.from_dict(serie, orient="index").sort_index()
+        tabella.index.name = "Giro"
+        st.line_chart(tabella, y_label="Secondi", height=320)
+        with st.expander("Tabella giro per giro"):
+            st.dataframe(tabella.reset_index(), hide_index=True, use_container_width=True)
+    else:
+        st.caption("In attesa del primo giro completato.")
+
+    soste = [{"Kart": k, **s} for k in scelti for s in fleet[k]["soste"]]
+    st.markdown("**Pit e tempo in sosta**")
+    if soste:
+        st.dataframe(pd.DataFrame(soste), hide_index=True, use_container_width=True)
+    else:
+        st.caption("Nessuna sosta registrata.")
 
 
 def render_analysis(provider: str | None, history_limit: int) -> None:
@@ -1532,6 +1752,7 @@ def render_analysis(provider: str | None, history_limit: int) -> None:
             file_name="pit-wall-analisi-apex.csv",
             mime="text/csv",
         )
+        render_analisi_kart()
     elif provider == "html":
         history = st.session_state.get("simulation_history", [])
         if not history:
@@ -1564,6 +1785,35 @@ def render_analysis(provider: str | None, history_limit: int) -> None:
         st.info("Cerca un Live Timing per iniziare una sessione di analisi.")
 
 
+@st.fragment(run_every=5)
+def render_classifica_sotto() -> None:
+    """Classifica live sotto le tab: resta aggiornata in qualunque sezione."""
+    snapshot = st.session_state.get("apex_snapshot")
+    if not snapshot or not snapshot.get('rows'):
+        return
+    st.divider()
+    st.subheader("Classifica live")
+    field_state = pro_tools.track_field(snapshot["rows"], add_event)
+    st.markdown(
+        pro_tools.standings_html(snapshot["rows"], field_state),
+        unsafe_allow_html=True,
+    )
+    with st.expander("Diagnostica feed Apex", expanded=False):
+        st.caption(
+            "Celle ricevute per la prima riga: tipo colonna → testo. "
+            "Se la classifica mostra trattini, questo elenco mostra quale colonna non viene letta."
+        )
+        sample = (snapshot.get("debug") or {}).get("sample") or []
+        if sample:
+            st.dataframe(
+                pd.DataFrame(sample, columns=["Colonna", "Valore"]),
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.info("Nessuna riga ricevuta ancora.")
+
+
 st.title("🏁 Pit Wall Engineering")
 timing_provider = st.session_state.get("timing_provider")
 st.caption(
@@ -1572,22 +1822,92 @@ st.caption(
 )
 
 pro_tools.inject_style()
-pit_tab, analysis_tab, planner_tab, sheets_tab, notebook_tab = st.tabs(
-    [
-        "🏎️ Pit wall",
-        "📈 Analisi",
-        "🧭 Pianificatore",
-        "📊 Fogli dati",
-        "📝 Taccuino tecnico",
-    ]
-)
-
-with planner_tab:
-    pro_tools.render_planner(
-        gare.load_gare(),
-        st.session_state.get(gare.VISTA),
-        on_save=gare.salva_piano,
+_gara_aperta_tab = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA))
+st.session_state["_tipo_gara"] = (_gara_aperta_tab or {}).get("tipo")
+if st.session_state["_tipo_gara"] == "Noleggio":
+    # Noleggio: niente penalità né pianificatore, solo muretto, analisi e fogli.
+    pit_tab, analysis_tab, confronto_tab, sheets_tab, notebook_tab = st.tabs(
+        ["🏎️ Pit wall", "📈 Analisi", "🆚 Confronto", "📊 Fogli dati", "📝 Taccuino tecnico"]
     )
+    penalty_tab = planner_tab = None
+else:
+    pit_tab, penalty_tab, analysis_tab, confronto_tab, planner_tab, sheets_tab, notebook_tab = st.tabs(
+        [
+            "🏎️ Pit wall",
+            "⚠️ Penalità e avvisi",
+            "📈 Analisi",
+            "🆚 Confronto",
+            "🧭 Pianificatore",
+            "📊 Fogli dati",
+            "📝 Taccuino tecnico",
+        ]
+    )
+
+
+@st.fragment(run_every=5)
+def render_penalties() -> None:
+    gid = st.session_state.get(gare.VISTA)
+    gara = gare.trova(gare.load_gare(), gid) if gid and gid != "home" else None
+    if gara:
+        titolo, bottone = st.columns([4, 1.6])
+        titolo.subheader("Penalità assegnate dal team")
+        bottone.write("")
+        if bottone.button("＋ Aggiungi penalità", type="primary", key=f"btn_pen_{gara['id']}"):
+            gare.dialog_penalita(gara["id"], gara.get("piloti", []))
+        manuali = list(reversed(gara.get("penalita", [])))
+        if not manuali:
+            st.caption("Nessuna penalità assegnata.")
+        for p in manuali:
+            with st.container(border=True):
+                testo, cestino = st.columns([5, 1])
+                testo.markdown(
+                    f"**{p.get('pilota', '')}** · {pro_tools.descrivi_penalita(p)} · {p.get('motivo', '')}  \n"
+                    f"{p.get('ora', '')}"
+                )
+                cestino.button(
+                    "🗑️",
+                    key=f"del_pen_{p['id']}",
+                    help="Elimina penalità",
+                    on_click=gare.elimina_penalita,
+                    args=(gara["id"], p["id"]),
+                )
+        st.divider()
+
+    mine = st.session_state.get("_apex_mine") or {}
+    items = [
+        c for c in reversed(st.session_state.get("_apex_comments", []))
+        if is_penalty_text(c["text"])
+    ]
+    miei = [c for c in items if is_mine(c["text"], mine)]
+    altri = [c for c in items if c not in miei]
+
+    def riga(c: dict) -> str:
+        return f"{c['time'] + ' · ' if c['time'] else ''}{c['text']}"
+
+    st.subheader("Le mie penalità e avvisi")
+    if not miei:
+        st.caption("Nessuna penalità o avviso per il tuo kart.")
+    for c in miei:
+        st.error(riga(c))
+
+    st.subheader("Tutte le altre penalità e avvisi")
+    if not altri:
+        st.caption("Nessun altro avviso.")
+    for c in altri:
+        st.markdown(f"- {riga(c)}")
+
+
+if penalty_tab is not None:
+    with penalty_tab:
+        render_penalties()
+
+if planner_tab is not None:
+    with planner_tab:
+        pro_tools.render_planner(
+            gare.load_gare(),
+            st.session_state.get(gare.VISTA),
+            on_save=gare.salva_piano,
+        )
 
 with sheets_tab:
     sheet_lap, sheet_boards = st.tabs(["⏱️ Giri", "🎨 Lavagne e schizzi"])
@@ -1631,6 +1951,9 @@ with analysis_tab:
     )(render_analysis)
     analysis_fragment(timing_provider, int(history_limit))
 
+with confronto_tab:
+    render_confronto()
+
 with notebook_tab:
     st.subheader("Taccuino tecnico")
     notebook_target = selected_pilot or "Generale"
@@ -1639,3 +1962,6 @@ with notebook_tab:
         "nel browser in uso, separati per pilota e Live Timing."
     )
     render_notebook(notebook_target, timing_url)
+
+
+render_classifica_sotto()
