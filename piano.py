@@ -48,7 +48,8 @@ def simula(
 def tempo_gara(gara: dict, apex_elapsed: float | None) -> float:
     """Secondi trascorsi dall'inizio gara: cronometro del muretto oppure Apex."""
     cron = gara.get("cronometro") or {}
-    if cron.get("usa_apex") and apex_elapsed is not None:
+    if apex_elapsed is not None and (cron.get("usa_apex") or apex_elapsed > 0):
+        # Appena il countdown di Apex parte, la strategia parte insieme alla gara.
         return apex_elapsed
     offset = float(cron.get("offset_s") or 0.0)
     if cron.get("stato") == "in_corso" and cron.get("avvio"):
@@ -84,7 +85,11 @@ def render_card(gara: dict, race_remaining: float | None, azioni) -> None:
 
     st.markdown("#### Strategia live")
     c1, c2 = st.columns([2, 5])
-    c1.metric("Tempo di gara", _hhmmss(elapsed), "in corso" if in_corso else "fermo")
+    if apex_elapsed is not None and apex_elapsed > 0:
+        etichetta = "da Apex"
+    else:
+        etichetta = "in corso" if in_corso else "fermo"
+    c1.metric("Tempo di gara", _hhmmss(elapsed), etichetta)
     with c2:
         b1, b2, b3 = st.columns(3)
         if in_corso:
@@ -137,7 +142,12 @@ def render_card(gara: dict, race_remaining: float | None, azioni) -> None:
         )
     else:
         k1, k2 = st.columns(2)
-        k1.metric("In sosta", "Pit stop in corso")
+        ultimo_pit = st.session_state.get("_ultimo_pit_apex") or ""
+        k1.metric(
+            "In sosta",
+            "Pit stop in corso",
+            f"ultimo pit Apex: {ultimo_pit}" if ultimo_pit else "ultimo pit Apex: —",
+        )
         k2.metric("Prossimo pilota", prossimo["pilota"] if prossimo else "—")
 
     b1, b2, _ = st.columns([1.3, 1.6, 4])
