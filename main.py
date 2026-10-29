@@ -738,6 +738,7 @@ def start_strategy_session(pilot: str, start_message: str) -> None:
     st.session_state["_stint_started_at"] = time.time()
     st.session_state["_stint_offset_s"] = 0.0
     st.session_state["_pits_stint_visti"] = None
+    st.session_state["fleet_laps"] = {}
     st.session_state["_five_minute_logged"] = False
     st.session_state["_stint_end_logged"] = False
     st.session_state["events"] = []
@@ -2000,12 +2001,12 @@ _gara_aperta_tab = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA)
 st.session_state["_tipo_gara"] = (_gara_aperta_tab or {}).get("tipo")
 if st.session_state["_tipo_gara"] == "Noleggio":
     # Noleggio: niente penalità né pianificatore, solo muretto, analisi e fogli.
-    pit_tab, analysis_tab, confronto_tab, sheets_tab, notebook_tab = st.tabs(
-        ["🏎️ Pit wall", "📈 Analisi", "🆚 Confronto", "📊 Fogli dati", "📝 Taccuino tecnico"]
+    pit_tab, analysis_tab, confronto_tab, sheets_tab, notebook_tab, settings_tab = st.tabs(
+        ["🏎️ Pit wall", "📈 Analisi", "🆚 Confronto", "📊 Fogli dati", "📝 Taccuino tecnico", "⚙️ Impostazioni"]
     )
     penalty_tab = planner_tab = None
 else:
-    pit_tab, penalty_tab, analysis_tab, confronto_tab, planner_tab, sheets_tab, notebook_tab = st.tabs(
+    pit_tab, penalty_tab, analysis_tab, confronto_tab, planner_tab, sheets_tab, notebook_tab, settings_tab = st.tabs(
         [
             "🏎️ Pit wall",
             "⚠️ Penalità e avvisi",
@@ -2014,6 +2015,7 @@ else:
             "🧭 Pianificatore",
             "📊 Fogli dati",
             "📝 Taccuino tecnico",
+            "⚙️ Impostazioni",
         ]
     )
 
@@ -2127,6 +2129,24 @@ with analysis_tab:
 
 with confronto_tab:
     render_confronto()
+
+with settings_tab:
+    gara_s = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA))
+    st.subheader("Impostazioni gara")
+    if gara_s and gara_s.get("stato") != "conclusa":
+        st.write(
+            "A gara finita premi il pulsante: salvo giri, analisi, pit, penalità e registro "
+            "nella gara e torno al calendario. Il report si apre con ℹ️ accanto alla gara."
+        )
+        st.button(
+            "🏁 Gara conclusa",
+            type="primary",
+            key=f"concludi_{gara_s['id']}",
+            on_click=gare.concludi_gara,
+            args=(gara_s["id"],),
+        )
+    elif gara_s:
+        st.success("Gara conclusa. Il report è nel calendario, con il tasto ℹ️.")
 
 with notebook_tab:
     st.subheader("Taccuino tecnico")

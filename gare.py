@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from datetime import date, datetime
 from pathlib import Path
@@ -198,6 +199,169 @@ def dialog_elimina(gara_id: str, nome: str) -> None:
         st.rerun()
 
 
+# --------------------------------------------------------------------------- #
+# Gara conclusa e report (sola lettura)
+# --------------------------------------------------------------------------- #
+_PAROLE_PENALITA = ("penal", "sanzion", "ammonizion", "avviso", "warning", "attenzione", "stop and go", "drive through")
+
+
+def _copia_json(dati):
+    return json.loads(json.dumps(dati, default=str))
+
+
+def concludi_gara(gara_id: str) -> None:
+    """Salva nella gara tutti i dati della sessione (giri, eventi, commenti, storico) e torna al calendario."""
+    mio = st.session_state.get("_apex_mine") or {}
+    report = {
+        "chiusa_il": datetime.now().isoformat(timespec="seconds"),
+        "mio_kart": str(mio.get("kart") or ""),
+        "mio_team": str(mio.get("team") or ""),
+        "kart": _copia_json(st.session_state.get("fleet_laps", {})),
+        "eventi": _copia_json(list(st.session_state.get("events", []))[:300]),
+        "commenti": _copia_json(list(st.session_state.get("_apex_comments", []))[-300:]),
+        "storico": _copia_json(list(st.session_state.get("apex_history", []))[-300:]),
+    }
+
+    def fn(g):
+        g["stato"] = "conclusa"
+        g["report"] = report
+
+    _aggiorna(gara_id, fn)
+    torna_home()
+
+
+def render_report(gara: dict) -> None:
+    gid = gara["id"]
+    titolo, indietro = st.columns([5, 1.4])
+    titolo.title(f"📊 Report · {gara['nome']}")
+    titolo.caption(" · ".join(x for x in [gara.get("team", ""), gara.get("data", ""), formato_tipo(gara)] if x))
+    indietro.write("")
+    if indietro.button("← Calendario", key=f"rep_indietro_{gid}"):
+        torna_home()
+        st.rerun()
+
+    rep = gara.get("report")
+    if not rep:
+        st.info("Questa gara non è ancora conclusa. Premi «Gara conclusa» nelle Impostazioni del muretto per salvare il report.")
+        return
+    st.caption(f"Conclusa il {rep.get('chiusa_il', '')}")
+
+    kart: dict = rep.get("kart") or {}
+    mio = rep.get("mio_kart", "")
+    t_ris, t_giri, t_ana, t_pit, t_pen, t_reg = st.tabs(
+        ["Riepilogo", "Giri", "Analisi", "Pit stop", "Penalità", "Registro e note"]
+    )
+
+    with t_ris:
+        righe = []
+        for k, v in kart.items():
+            tempi = [g["tempo_s"] for g in v.get("giri", []) if g.get("tempo_s")]
+            penalita_apex = sum(
+                1 for c in rep.get("commenti", [])
+                if any(p in c.get("text", "").lower() for p in _PAROLE_PENALITA)
+                and k and re.search(rf"(?<!\d){re.escape(str(k))}(?!\d)", c.get("text", ""))
+            )
+            righe.append(
+                {
+                    "Kart": k,
+                    "Team / pilota": v.get("team") or "—",
+                    "Giri": v.get("prev_giri") or 0,
+                    "Giro più veloce (s)": round(min(tempi), 3) if tempi else None,
+                    "Giro medio (s)": round(sum(tempi) / len(tempi), 3) if tempi else None,
+                    "Soste": v.get("prev_soste") or 0,
+                    "Penalità Apex": penalita_apex,
+                }
+            )
+        if righe:
+            st.dataframe(pd.DataFrame(righe), hide_index=True, use_container_width=True)
+        else:
+            st.caption("Nessun dato di gara salvato.")
+
+    with t_giri:
+        if not kart:
+            st.caption("Nessun giro salvato.")
+        else:
+            opzioni = list(kart)
+            default = [mio] if mio in kart else opzioni[:2]
+            scelti = st.multiselect("Kart", opzioni, default=default, key=f"rep_giri_{gid}")
+            serie: dict[int, dict[str, float]] = {}
+            for k in scelti:
+                for g in kart[k].get("giri", []):
+                    if g.get("tempo_s"):
+                        serie.setdefault(g["giro"], {})[f"Kart {k}"] = g["tempo_s"]
+            if serie:
+                tabella = pd.DataFrame.from_dict(serie, orient="index").sort_index()
+                tabella.index.name = "Giro"
+                st.line_chart(tabella, y_label="Secondi", height=320)
+                st.dataframe(tabella.reset_index(), hide_index=True, use_container_width=True)
+            else:
+                st.caption("Nessun giro da mostrare.")
+
+    with t_ana:
+        v = kart.get(mio)
+        if not v or not v.get("giri"):
+            st.caption("Nessun giro del nostro kart salvato.")
+        else:
+            giri = pd.DataFrame(v["giri"])
+            st.markdown(f"**Kart {mio} · giro per giro**")
+            st.dataframe(giri, hide_index=True, use_container_width=True)
+            serie = giri.dropna(subset=["distacco_s"])
+            if len(serie):
+                st.markdown("**Distacco dal leader**")
+                st.line_chart(serie.set_index("giro")[["distacco_s"]], y_label="Secondi", height=260)
+
+    with t_pit:
+        soste = [{"Kart": k, **s} for k, v in kart.items() for s in v.get("soste", [])]
+        if soste:
+            st.dataframe(pd.DataFrame(soste), hide_index=True, use_container_width=True)
+        else:
+            st.caption("Nessuna sosta registrata da Apex.")
+        manuali = gara.get("pit_eseguiti", [])
+        if manuali:
+            st.markdown("**Pit ora registrati dal muretto (tempo di gara)**")
+            st.dataframe(
+                pd.DataFrame({"Pit": range(1, len(manuali) + 1),
+                              "Tempo di gara": [f"{int(t // 3600):02d}:{int(t % 3600 // 60):02d}:{int(t % 60):02d}" for t in manuali]}),
+                hide_index=True, use_container_width=True,
+            )
+
+    with t_pen:
+        penalita = gara.get("penalita", [])
+        st.markdown("**Penalità assegnate dal team**")
+        if penalita:
+            st.dataframe(
+                pd.DataFrame([
+                    {"Pilota": p.get("pilota", ""), "Penalità": pro_tools.descrivi_penalita(p),
+                     "Motivo": p.get("motivo", ""), "Ora": p.get("ora", "")}
+                    for p in penalita
+                ]),
+                hide_index=True, use_container_width=True,
+            )
+        else:
+            st.caption("Nessuna penalità assegnata dal team.")
+        st.markdown("**Penalità e avvisi da Apex**")
+        apex = [c for c in rep.get("commenti", []) if any(p in c.get("text", "").lower() for p in _PAROLE_PENALITA)]
+        if apex:
+            st.dataframe(pd.DataFrame(apex), hide_index=True, use_container_width=True)
+        else:
+            st.caption("Nessuna penalità o avviso da Apex.")
+
+    with t_reg:
+        eventi = rep.get("eventi", [])
+        note_rapide = [e for e in eventi if str(e.get("message", "")).startswith("📻")]
+        st.markdown("**Note rapide del muretto**")
+        if note_rapide:
+            st.dataframe(pd.DataFrame(note_rapide), hide_index=True, use_container_width=True)
+        else:
+            st.caption("Nessuna nota rapida.")
+        st.markdown("**Registro attività**")
+        if eventi:
+            st.dataframe(pd.DataFrame(eventi), hide_index=True, use_container_width=True)
+        else:
+            st.caption("Registro vuoto.")
+        st.info("Note e schizzi del Taccuino tecnico e delle lavagne non sono inclusi: restano salvati nel browser.")
+
+
 def render_home() -> None:
     gare = sorted(load_gare(), key=lambda g: g.get("data", ""), reverse=True)
 
@@ -215,7 +379,7 @@ def render_home() -> None:
             st.info("Nessuna gara ancora. Premi **＋ Nuova gara** in alto a destra.")
         for gara in gare:
             with st.container(border=True):
-                c1, c2, c3, c4, c5, c6 = st.columns([3, 2.2, 2, 2, 1, 0.5])
+                c1, c2, c3, c4, c5, c6, c7 = st.columns([3, 2.2, 2, 2, 1, 0.5, 0.5])
                 sottotitolo = " · ".join(x for x in [gara.get("team", ""), gara.get("data", "")] if x)
                 c1.markdown(f"**{gara['nome']}**  \n{sottotitolo}")
                 c2.markdown(f"{formato_tipo(gara)}  \n{len(gara.get('piloti', []))} piloti")
@@ -227,7 +391,10 @@ def render_home() -> None:
                 if c5.button("Apri", key=f"apri_{gara['id']}"):
                     apri_gara(gara["id"])
                     st.rerun()
-                if c6.button("🗑️", key=f"del_{gara['id']}", help="Elimina questa gara"):
+                if c6.button("ℹ️", key=f"info_{gara['id']}", help="Report della gara"):
+                    st.session_state[VISTA] = f"report:{gara['id']}"
+                    st.rerun()
+                if c7.button("🗑️", key=f"del_{gara['id']}", help="Elimina questa gara"):
                     dialog_elimina(gara["id"], gara["nome"])
 
     with tab_fatture:
@@ -401,6 +568,14 @@ def route() -> None:
     pro_tools.inject_style()
     gare = load_gare()
     gara_id = st.session_state.get(VISTA, "home")
+    if str(gara_id).startswith("report:"):
+        gara_rep = trova(gare, gara_id.split(":", 1)[1])
+        if gara_rep is None:
+            torna_home()
+            render_home()
+            st.stop()
+        render_report(gara_rep)
+        st.stop()
     gara = trova(gare, gara_id) if gara_id != "home" else None
 
     if gara is None:
