@@ -455,6 +455,14 @@ def parse_apex_frame(frame: str, state: dict | None = None) -> dict:
     debug_sample: list[tuple[str, str]] = []
     for row_id, values in cells.items():
         by_type = {header[col]: text for col, text in values.items() if header.get(col)}
+        if "tlp" not in by_type:
+            # Colonna "Vueltas" senza intestazione: è l'ultima colonna con solo numeri interi.
+            interi = [
+                text for col, text in sorted(values.items(), key=lambda kv: int(kv[0][1:]))
+                if not header.get(col) and re.fullmatch(r"\d+", text.strip())
+            ]
+            if interi:
+                by_type["tlp"] = interi[-1].strip()
         if not debug_sample and by_type:
             debug_sample = [(header.get(col, ""), text) for col, text in values.items()]
         team = clean_apex_name(by_type.get("dr", ""))
