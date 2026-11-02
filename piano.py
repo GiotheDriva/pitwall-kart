@@ -50,11 +50,11 @@ def tempo_gara(gara: dict, apex_elapsed: float | None) -> float:
     cron = gara.get("cronometro") or {}
     if apex_elapsed is not None and (cron.get("usa_apex") or apex_elapsed > 0):
         # Appena il countdown di Apex parte, la strategia parte insieme alla gara.
-        return apex_elapsed
+        return max(0.0, apex_elapsed)
     offset = float(cron.get("offset_s") or 0.0)
     if cron.get("stato") == "in_corso" and cron.get("avvio"):
         offset += datetime.now().timestamp() - float(cron["avvio"])
-    return offset
+    return max(0.0, offset)
 
 
 def _mmss(seconds: float) -> str:
