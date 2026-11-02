@@ -13,35 +13,74 @@ import pandas as pd
 import streamlit as st
 
 
+def extra_penalita(gara: dict) -> tuple[list[float], float]:
+    """Secondi di penalità: quelli già scontati a ogni pit registrato, e quelli ancora da scontare."""
+    pits = gara.get("pit_eseguiti") or []
+    tempo_giro = float((gara.get("piano") or {}).get("tempo_giro") or 46.0)
+    per_pit = [0.0] * len(pits)
+    pendenti = 0.0
+    for p in gara.get("penalita") or []:
+        valore = float(p.get("valore") or 0)
+        secondi = valore * tempo_giro if p.get("tipo") == "giri" else valore
+        k = p.get("scontata_pit")
+        if k is None:
+            pendenti += secondi
+        elif 1 <= int(k) <= len(pits):
+            per_pit[int(k) - 1] += secondi
+    return per_pit, pendenti
+
+
 def simula(
     durata_s: float,
     stint_s: float,
     pit_s: float,
     piloti: list[str],
     pit_manuali: list[float],
+    extra_manuali: list[float] | None = None,
+    extra_futuri: float = 0.0,
+    adesso: float = 0.0,
+    durate_stint: list[float] | None = None,
+    piloti_stint: list[str] | None = None,
 ) -> list[dict]:
-    """Stint in secondi dall'inizio gara, con i pit manuali inseriti."""
+    """Stint in secondi dall'inizio gara, con i pit registrati e quelli pianificati.
+
+    extra_manuali: secondi di penalità scontati a ogni pit registrato (stesso ordine di pit_manuali).
+    extra_futuri: penalità ancora da scontare, pagate al primo pit pianificato dopo `adesso`.
+    durate_stint: durata in minuti di ogni stint, se diversa da stint_s.
+    piloti_stint: pilota di ogni stint, se diverso dalla rotazione.
+    """
     piloti = piloti or ["Pilota 1"]
+    extra_per_pit = {round(t, 1): e for t, e in zip(pit_manuali, extra_manuali or [])}
     manuali = sorted(t for t in pit_manuali if 0 < t < durata_s)
     stints: list[dict] = []
     t = 0.0
+    pendente = float(extra_futuri or 0.0)
     while t < durata_s - 1e-6 and len(stints) < 500:
         while manuali and manuali[0] < t:
             manuali.pop(0)
-        fine = min(t + stint_s, durata_s)
+        idx = len(stints)
+        durata = stint_s
+        if durate_stint and idx < len(durate_stint) and durate_stint[idx] > 0:
+            durata = durate_stint[idx] * 60
+        fine = min(t + durata, durata_s)
+        e_pit = 0.0
         if manuali and t <= manuali[0] < fine:
             fine = manuali.pop(0)
+            e_pit = extra_per_pit.get(round(fine, 1), 0.0)
+        elif pendente and adesso <= fine < durata_s - 1e-6:
+            e_pit = pendente
+            pendente = 0.0
+        pilota = (
+            piloti_stint[idx]
+            if piloti_stint and idx < len(piloti_stint)
+            else piloti[idx % len(piloti)]
+        )
         stints.append(
-            {
-                "n": len(stints) + 1,
-                "pilota": piloti[len(stints) % len(piloti)],
-                "inizio": t,
-                "fine": fine,
-            }
+            {"n": idx + 1, "pilota": pilota, "inizio": t, "fine": fine, "penalita_s": e_pit}
         )
         if fine >= durata_s - 1e-6:
             break
-        t = fine + pit_s
+        t = fine + pit_s + e_pit
     return stints
 
 
@@ -119,8 +158,15 @@ def render_card(gara: dict, race_remaining: float | None, azioni) -> None:
         st.info("In attesa del via: la strategia parte quando parte la gara (Avvia gara o countdown Apex).")
 
     pit_manuali = [float(t) for t in gara.get("pit_eseguiti", [])]
+    per_pit, pendenti = extra_penalita(gara)
     stints = simula(durata_s, float(piano["stint_min"]) * 60, float(piano["pit_sec"]),
-                    piano.get("piloti", []), pit_manuali)
+                    piano.get("piloti", []), pit_manuali, per_pit, pendenti, elapsed,
+                    piano.get("durate_stint"), piano.get("piloti_stint"))
+    if pendenti > 0:
+        st.warning(
+            f"Penalità da scontare al prossimo pit: +{pendenti:g} s · "
+            f"la sosta sarà {float(piano['pit_sec']) + pendenti:g} s"
+        )
     pit_totali = len(stints) - 1
     pit_minimo = int(piano.get("pit_minimo") or 0)
 

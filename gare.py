@@ -610,7 +610,12 @@ def registra_pit(gara_id: str, elapsed_s: float) -> None:
     gare_all = load_gare()
     gara = trova(gare_all, gara_id)
     if gara:
-        gara.setdefault("pit_eseguiti", []).append(round(float(elapsed_s), 1))
+        pits = gara.setdefault("pit_eseguiti", [])
+        pits.append(round(float(elapsed_s), 1))
+        # Le penalità ancora da scontare si pagano a questa sosta.
+        for p in gara.get("penalita", []):
+            if p.get("scontata_pit") is None:
+                p["scontata_pit"] = len(pits)
         save_gare(gare_all)
 
 
@@ -618,7 +623,12 @@ def annulla_pit(gara_id: str) -> None:
     gare_all = load_gare()
     gara = trova(gare_all, gara_id)
     if gara and gara.get("pit_eseguiti"):
+        n = len(gara["pit_eseguiti"])
         gara["pit_eseguiti"].pop()
+        # Le penalità scontate in quella sosta tornano da scontare.
+        for p in gara.get("penalita", []):
+            if p.get("scontata_pit") == n:
+                p["scontata_pit"] = None
         save_gare(gare_all)
 
 
@@ -700,6 +710,15 @@ def aggiungi_penalita(gara_id: str, pilota: str, tipo: str, valore: float, motiv
 def elimina_penalita(gara_id: str, pen_id: str) -> None:
     def fn(g):
         g["penalita"] = [p for p in g.get("penalita", []) if p.get("id") != pen_id]
+    _aggiorna(gara_id, fn)
+
+
+def segna_scontata(gara_id: str, pen_id: str, scontata: bool) -> None:
+    """Segna a mano una penalità come scontata (o la riapre). Senza pit registrati vale 0: nessun tempo extra."""
+    def fn(g):
+        for p in g.get("penalita", []):
+            if p.get("id") == pen_id:
+                p["scontata_pit"] = len(g.get("pit_eseguiti") or []) if scontata else None
     _aggiorna(gara_id, fn)
 
 

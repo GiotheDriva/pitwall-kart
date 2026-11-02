@@ -86,6 +86,32 @@ def build_stints(
     return stints
 
 
+def build_stints_custom(
+    race_minutes: float,
+    durate: list[float],
+    default_minutes: float,
+    pit_seconds: float,
+    roster: list[str],
+    piloti_stint: list[str],
+    extra_pit: dict[int, float] | None = None,
+) -> list[dict]:
+    """Stint con durata e pilota decisi uno per uno. Gli stint oltre la lista usano i valori generali."""
+    stints: list[dict] = []
+    cursor = 0.0
+    index = 1
+    while cursor < race_minutes - 1e-6 and index <= 500:
+        i = index - 1
+        minuti = durate[i] if i < len(durate) else default_minutes
+        pilota = piloti_stint[i] if i < len(piloti_stint) else roster[i % len(roster)]
+        end = min(cursor + minuti, race_minutes)
+        if end <= cursor:
+            break
+        stints.append({"stint": index, "pilota": pilota, "inizio": cursor, "fine": end, "durata": end - cursor})
+        cursor = end + (pit_seconds + (extra_pit or {}).get(index, 0)) / 60
+        index += 1
+    return stints
+
+
 def secondi_penalita(penalita: dict, tempo_giro: float = 46.0) -> float:
     """Converte una penalità in secondi: le penalità a giri usano il tempo medio giro."""
     valore = float(penalita.get("valore") or 0)
@@ -109,7 +135,7 @@ def assegna_penalita(
     usate: dict[str, int] = {}
     for pen in sorted(penalita, key=lambda p: p.get("ora", "")):
         pilota = pen.get("pilota", "")
-        turni = [s["stint"] for s in stints if roster[(s["stint"] - 1) % len(roster)] == pilota]
+        turni = [s["stint"] for s in stints if s.get("pilota", roster[(s["stint"] - 1) % len(roster)]) == pilota]
         riga = {
             "Pilota": pilota,
             "Penalità": descrivi_penalita(pen),
@@ -181,22 +207,52 @@ def render_planner(
         "Tempo medio giro (s), usato per le penalità a giri",
         20.0, 120.0, 46.0, 0.5, key=f"pl_giro_{gid}",
     )
+    guida_max = st.number_input(
+        "Guida massima per pilota (min, 0 = libera)", 0, 600, 0, 5, key=f"pl_guida_max_{gid}",
+        help="Se un pilota supera questo tempo totale al volante, il piano lo segnala.",
+    )
 
     race_min = race_hours * 60
-    stints = build_stints(int(race_min), int(stint_min), int(pit_sec))
-    if not stints:
+    base = build_stints(int(race_min), int(stint_min), int(pit_sec))
+    if not base:
         st.info("Imposta una durata valida.")
         return
 
-    # Le penalità del calendario si scontano nelle soste dei piloti colpevoli.
-    penalita = gara.get("penalita", []) if gara else []
+    st.markdown("**Stint uno per uno** · cambia pilota e durata di ogni stint, aggiungi righe se servono.")
+    modifica = st.data_editor(
+        pd.DataFrame(
+            [{"Pilota": roster[i % len(roster)], "Durata (min)": round(s["durata"], 1)} for i, s in enumerate(base)]
+        ),
+        num_rows="dynamic",
+        column_config={
+            "Pilota": st.column_config.SelectboxColumn("Pilota", options=roster, required=True),
+            "Durata (min)": st.column_config.NumberColumn("Durata (min)", min_value=1.0, max_value=600.0, step=0.5),
+        },
+        key=f"pl_stints_{gid}_{stint_min}_{race_hours}_{pit_sec}_{'|'.join(roster)}",
+        use_container_width=True,
+    )
+    durate: list[float] = []
+    piloti_stint: list[str] = []
+    for i, riga in enumerate(modifica.to_dict("records")):
+        durata = riga.get("Durata (min)")
+        durate.append(float(durata) if durata is not None and not pd.isna(durata) else float(stint_min))
+        pilota = riga.get("Pilota")
+        piloti_stint.append(str(pilota) if isinstance(pilota, str) and pilota else roster[i % len(roster)])
+
+    stints = build_stints_custom(race_min, durate, stint_min, pit_sec, roster, piloti_stint)
+    if not stints:
+        st.info("Imposta almeno uno stint.")
+        return
+
+    # Le penalità ancora da scontare si pagano nelle soste dei piloti colpevoli.
+    penalita = [p for p in (gara.get("penalita", []) if gara else []) if p.get("scontata_pit") is None]
     extra_pit, penalty_rows = assegna_penalita(penalita, stints, roster, tempo_giro)
     if extra_pit:
-        stints = build_stints(int(race_min), int(stint_min), int(pit_sec), extra_pit)
+        stints = build_stints_custom(race_min, durate, stint_min, pit_sec, roster, piloti_stint, extra_pit)
 
     rows = []
     for s in stints:
-        driver = roster[(s["stint"] - 1) % len(roster)]
+        driver = s["pilota"]
         rows.append(
             {
                 "Stint": s["stint"],
@@ -242,6 +298,12 @@ def render_planner(
             f"la durata massima di ciascuno è {max_stint:.1f} min."
         )
 
+    if guida_max:
+        totali = plan.groupby("Pilota")["Durata (min)"].sum()
+        oltre = totali[totali > guida_max]
+        if not oltre.empty:
+            st.warning("Oltre la guida massima: " + ", ".join(f"{n} ({v:.0f} min)" for n, v in oltre.items()))
+
     if penalty_rows:
         st.markdown("**Penalità da scontare ai box**")
         st.dataframe(pd.DataFrame(penalty_rows), hide_index=True, use_container_width=True)
@@ -257,6 +319,9 @@ def render_planner(
             "min_stint": float(min_stint_min),
             "pit_minimo": int(pit_min),
             "piloti": roster,
+            "tempo_giro": float(tempo_giro),
+            "durate_stint": durate,
+            "piloti_stint": piloti_stint,
         }
         st.button(
             "📌 Usa questo piano per il muretto",

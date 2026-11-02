@@ -1540,12 +1540,18 @@ def render_live_dashboard(
         if durata_plan > 0:
             apex_el = durata_plan - race_remaining if race_remaining is not None else None
             elapsed_plan = piano.tempo_gara(gara_aperta, apex_el)
+            per_pit, pendenti = piano.extra_penalita(gara_aperta)
             stints_plan = piano.simula(
                 durata_plan,
                 float(plan["stint_min"]) * 60,
                 float(plan["pit_sec"]),
                 plan.get("piloti", []),
                 [float(t) for t in gara_aperta.get("pit_eseguiti", [])],
+                per_pit,
+                pendenti,
+                elapsed_plan,
+                plan.get("durate_stint"),
+                plan.get("piloti_stint"),
             )
             attuale = next((s for s in stints_plan if s["inizio"] <= elapsed_plan < s["fine"]), None)
             prossimo = next((s for s in stints_plan if s["inizio"] > elapsed_plan), None)
@@ -2107,12 +2113,33 @@ def render_penalties() -> None:
         if not manuali:
             st.caption("Nessuna penalità assegnata.")
         for p in manuali:
+            k = p.get("scontata_pit")
+            if k is None:
+                stato = "⏳ da scontare al prossimo pit"
+            elif k == 0:
+                stato = "✅ scontata"
+            else:
+                stato = f"✅ scontata al pit n. {k}"
             with st.container(border=True):
-                testo, cestino = st.columns([5, 1])
+                testo, azione, cestino = st.columns([4, 1.6, 0.6])
                 testo.markdown(
                     f"**{p.get('pilota', '')}** · {pro_tools.descrivi_penalita(p)} · {p.get('motivo', '')}  \n"
-                    f"{p.get('ora', '')}"
+                    f"{p.get('ora', '')} · **{stato}**"
                 )
+                if k is None:
+                    azione.button(
+                        "✔ Segna scontata",
+                        key=f"scont_pen_{p['id']}",
+                        on_click=gare.segna_scontata,
+                        args=(gara["id"], p["id"], True),
+                    )
+                else:
+                    azione.button(
+                        "↩ Riapri",
+                        key=f"scont_pen_{p['id']}",
+                        on_click=gare.segna_scontata,
+                        args=(gara["id"], p["id"], False),
+                    )
                 cestino.button(
                     "🗑️",
                     key=f"del_pen_{p['id']}",
