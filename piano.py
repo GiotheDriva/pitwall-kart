@@ -51,25 +51,28 @@ def simula(
     """
     piloti = piloti or ["Pilota 1"]
     extra_per_pit = {round(t, 1): e for t, e in zip(pit_manuali, extra_manuali or [])}
-    manuali = sorted(t for t in pit_manuali if 0 < t < durata_s)
+    reali = sorted(t for t in pit_manuali if 0 < t < durata_s)
     stints: list[dict] = []
     t = 0.0
     pendente = float(extra_futuri or 0.0)
     while t < durata_s - 1e-6 and len(stints) < 500:
-        while manuali and manuali[0] < t:
-            manuali.pop(0)
+        # Ogni sosta reale chiude lo stint in quel momento: lo stint successivo riprende
+        # il pilota e la durata della riga del pianificatore corrispondente.
         idx = len(stints)
         durata = stint_s
         if durate_stint and idx < len(durate_stint) and durate_stint[idx] > 0:
             durata = durate_stint[idx] * 60
-        fine = min(t + durata, durata_s)
+        reale = next((r for r in reali if r > t + 1e-6), None)
         e_pit = 0.0
-        if manuali and t <= manuali[0] < fine:
-            fine = manuali.pop(0)
+        if reale is not None:
+            fine = reale
             e_pit = extra_per_pit.get(round(fine, 1), 0.0)
-        elif pendente and adesso <= fine < durata_s - 1e-6:
-            e_pit = pendente
-            pendente = 0.0
+        else:
+            # Nessuna sosta reale ancora: si prosegue con i tempi previsti.
+            fine = min(t + durata, durata_s)
+            if pendente and adesso <= fine < durata_s - 1e-6:
+                e_pit = pendente
+                pendente = 0.0
         pilota = (
             piloti_stint[idx]
             if piloti_stint and idx < len(piloti_stint)
