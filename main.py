@@ -1574,6 +1574,12 @@ def render_live_dashboard(
     gara_in_attesa = bool(race_total) and not race_finita and not _gara_avviata(gara_aperta, race_remaining)
     if gara_in_attesa:
         st.session_state["_stint_started_at"] = time.time()
+    # Pit del nostro kart rilevato da Apex: lo registro come "Pit ora", così la strategia si ricalcola da sola.
+    if st.session_state.pop("_pit_auto_pendente", False) and gara_aperta and gara_aperta.get("tipo") == "Endurance":
+        apex_el = (race_total - race_remaining) if race_total and race_remaining is not None else None
+        tempo_pit = piano.tempo_gara(gara_aperta, apex_el)
+        if tempo_pit > 1.0 and gare.registra_pit(gara_aperta["id"], tempo_pit):
+            gara_aperta.setdefault("pit_eseguiti", []).append(round(tempo_pit, 1))
     plan = gara_aperta.get("piano") if gara_aperta and gara_aperta.get("tipo") == "Endurance" else None
     if plan and "stint_min" not in plan:
         plan = None  # piano incompleto (es. solo tempo di sosta): trattalo come assente
@@ -1756,6 +1762,8 @@ def record_fleet(snapshot: dict) -> None:
         if pits is not None:
             if f["prev_soste"] is not None and pits > f["prev_soste"]:
                 f["ai_box_da"] = time.time()  # entrata ai box: resta dentro fino al tempo di sosta
+                if key == _mio_kart():
+                    st.session_state["_pit_auto_pendente"] = True  # il nostro kart è entrato ai box
                 f["soste"].append(
                     {"giro": laps, "totale": pits, "durata": row.get("last_pit", ""), "orario": now}
                 )

@@ -606,17 +606,23 @@ def salva_piano(gara_id: str, piano: dict) -> None:
         save_gare(gare_all)
 
 
-def registra_pit(gara_id: str, elapsed_s: float) -> None:
+def registra_pit(gara_id: str, elapsed_s: float) -> bool:
+    """Registra una sosta. Ritorna False se è già registrata (stessa sosta da Apex e dal pulsante)."""
     gare_all = load_gare()
     gara = trova(gare_all, gara_id)
-    if gara:
-        pits = gara.setdefault("pit_eseguiti", [])
-        pits.append(round(float(elapsed_s), 1))
-        # Le penalità ancora da scontare si pagano a questa sosta.
-        for p in gara.get("penalita", []):
-            if p.get("scontata_pit") is None:
-                p["scontata_pit"] = len(pits)
-        save_gare(gare_all)
+    if not gara:
+        return False
+    pits = gara.setdefault("pit_eseguiti", [])
+    tempo = round(float(elapsed_s), 1)
+    if pits and abs(tempo - pits[-1]) < 60:
+        return False
+    pits.append(tempo)
+    # Le penalità ancora da scontare si pagano a questa sosta.
+    for p in gara.get("penalita", []):
+        if p.get("scontata_pit") is None:
+            p["scontata_pit"] = len(pits)
+    save_gare(gare_all)
+    return True
 
 
 def annulla_pit(gara_id: str) -> None:
