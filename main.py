@@ -2476,10 +2476,8 @@ with settings_tab:
         piloti_att = gara_s.get("piloti") or []
         test_att = gara_s.get("test") or {}
         with st.form(f"form_test_{gid_t}"):
-            c1, c2 = st.columns(2)
-            n_piloti = c1.number_input("Numero di piloti", 1, 10, max(1, len(piloti_att) or 2), 1, key=f"test_np_{gid_t}")
-            ore_test = c2.number_input("Durata gara (ore)", 0.25, 24.0, float(gara_s.get("ore") or 1.0), 0.25, key=f"test_ore_{gid_t}")
-            nomi = st.text_area("Nomi dei piloti (uno per riga)", value="\n".join(piloti_att), height=110, key=f"test_nomi_{gid_t}")
+            ore_test = st.number_input("Durata gara (ore)", 0.25, 24.0, float(gara_s.get("ore") or 1.0), 0.25, key=f"test_ore_{gid_t}")
+            nomi = st.text_area("Nomi dei piloti (uno per riga, quanti ne vuoi)", value="\n".join(piloti_att), height=110, key=f"test_nomi_{gid_t}")
             c3, c4, c5, c6 = st.columns(4)
             pit_test = c3.number_input("Pit obbligatori", 0, 50, int(gara_s.get("pit_minimo") or 0), 1, key=f"test_pit_{gid_t}")
             min_test = c4.number_input("Minimo in pista (min)", 1.0, 240.0, float(test_att.get("stint_min_min", 10.0)), 1.0, key=f"test_min_{gid_t}")
@@ -2493,14 +2491,19 @@ with settings_tab:
             nostro_test = g4.number_input("Passo del nostro kart (s)", 20.0, 300.0, float(test_att.get("giro_nostro_s", 60.0)), 0.5, key=f"test_nostro_{gid_t}")
             salva_test = st.form_submit_button("Salva parametri di test", type="primary")
         if salva_test:
-            nomi_lista = [n.strip() for n in nomi.splitlines() if n.strip()]
-            nomi_lista = (nomi_lista + [f"Pilota {i}" for i in range(len(nomi_lista) + 1, int(n_piloti) + 1)])[: int(n_piloti)]
+            nomi_lista = [n.strip() for n in nomi.splitlines() if n.strip()] or ["Pilota 1"]
             gare.salva_parametri_test(
                 gid_t, nomi_lista, ore_test, pit_test, min_test, max_test, pitmax_test,
                 bot_n=int(bot_test), giro_veloce_s=float(veloce_test),
                 giro_lento_s=float(lento_test), giro_nostro_s=float(nostro_test),
             )
-            st.success("Parametri salvati: pianificatore e muretto usano i nuovi valori.")
+            st.success(f"Salvati {len(nomi_lista)} piloti: il Pianificatore li usa subito.")
+            piloti_pinnati = (gara_s.get("piano") or {}).get("piloti")
+            if piloti_pinnati and piloti_pinnati != nomi_lista:
+                st.warning(
+                    "Il piano pinnato sul muretto usa ancora i nomi di prima: "
+                    "nel Pianificatore premi di nuovo **📌 Usa questo piano per il muretto**."
+                )
 
     st.divider()
     st.subheader("Notifiche")
