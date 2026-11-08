@@ -97,6 +97,8 @@ def euro(value: float | int | None) -> str:
 
 
 def formato_tipo(gara: dict) -> str:
+    if gara.get("test"):
+        return f"TEST · Endurance · {gara.get('ore') or '—'} h"
     if gara.get("tipo") == "Endurance":
         return f"Endurance · {gara.get('ore') or '—'} h"
     if gara.get("tipo") == "Noleggio":
@@ -116,13 +118,29 @@ def torna_home() -> None:
 # --------------------------------------------------------------------------- #
 # Nuova gara
 # --------------------------------------------------------------------------- #
+# Valori di partenza di una gara TEST: nessun dato reale, tutto si imposta nelle Impostazioni.
+TEST_PREDEFINITI = {
+    "stint_min_min": 10.0,
+    "stint_max_min": 40.0,
+    "pit_max_s": 180.0,
+    "bot_n": 5,
+    "giro_veloce_s": 55.0,   # giro migliore a cui puntano i bot
+    "giro_lento_s": 68.0,    # giro peggiore: i bot più scarsi
+    "giro_nostro_s": 60.0,   # passo del nostro kart nella simulazione
+}
+
+
 @st.dialog("Nuova gara")
 def dialog_nuova_gara() -> None:
     nome = st.text_input("Nome della gara *", key="ng_nome", placeholder="Es. 4 ore di Pomposa")
     c1, c2 = st.columns(2)
-    tipo = c1.radio("Tipo di gara", ["Endurance", "Sprint", "Noleggio"], horizontal=True, key="ng_tipo")
+    tipo = c1.radio("Tipo di gara", ["Endurance", "Sprint", "Noleggio", "TEST"], horizontal=True, key="ng_tipo")
+    es_test = tipo == "TEST"
     if tipo == "Noleggio":
         team = ""  # nel noleggio si partecipa come piloti singoli
+    elif es_test:
+        team = "TEST"
+        c2.caption("Gara di prova: nessun dato reale. Tutto si imposta nelle Impostazioni.")
     else:
         team = c2.text_input("Nome del team *", key="ng_team")
 
@@ -131,6 +149,9 @@ def dialog_nuova_gara() -> None:
     if tipo == "Noleggio":
         minuti = c3.number_input("Durata (minuti)", min_value=5, max_value=600, value=20, step=5, key="ng_minuti")
         ore = None
+        giri = None
+    elif es_test:
+        ore = 1.0
         giri = None
     elif tipo == "Endurance":
         ore = c3.number_input("Durata (ore)", min_value=0.5, max_value=24.0, value=4.0, step=0.5, key="ng_ore")
@@ -141,9 +162,9 @@ def dialog_nuova_gara() -> None:
     quota = c4.number_input("Quota di partecipazione (€)", min_value=0.0, value=0.0, step=5.0, key="ng_quota")
 
     data_gara = st.date_input("Data della gara", value=date.today(), key="ng_data")
-    piloti_txt = st.text_area("Piloti (uno per riga)", key="ng_piloti", height=110)
+    piloti_txt = "" if es_test else st.text_area("Piloti (uno per riga)", key="ng_piloti", height=110)
     pit_minimo = 0
-    if tipo != "Noleggio":
+    if tipo not in ("Noleggio", "TEST"):
         pit_minimo = st.number_input("Pit minimo obbligatorio", min_value=0, max_value=50, value=0, step=1,
                                      key="ng_pit", help="Numero minimo di soste previste dal regolamento.")
     link = st.text_input(
@@ -153,13 +174,15 @@ def dialog_nuova_gara() -> None:
     )
 
     if st.button("Crea gara", type="primary", key="ng_crea"):
-        if not nome.strip() or (tipo != "Noleggio" and not team.strip()):
+        if es_test and not nome.strip():
+            nome = "TEST"
+        if not nome.strip() or (tipo not in ("Noleggio", "TEST") and not team.strip()):
             st.error("Nome della gara e nome del team sono obbligatori.")
             return
         gara = {
             "id": uuid.uuid4().hex[:12],
             "nome": nome.strip(),
-            "tipo": tipo,
+            "tipo": "Endurance" if es_test else tipo,
             "ore": float(ore) if ore is not None else None,
             "giri": int(giri) if giri is not None else None,
             "minuti": int(minuti) if minuti is not None else None,
@@ -174,6 +197,9 @@ def dialog_nuova_gara() -> None:
             "note": "",
             "creata": datetime.now().isoformat(timespec="seconds"),
         }
+        if es_test:
+            gara["piloti"] = ["Pilota 1", "Pilota 2"]
+            gara["test"] = dict(TEST_PREDEFINITI)
         gare = load_gare()
         gare.append(gara)
         save_gare(gare)
@@ -598,6 +624,35 @@ def route() -> None:
 # --------------------------------------------------------------------------- #
 # Piano vivo: salvataggio da Pianificatore e pit registrati dal muretto
 # --------------------------------------------------------------------------- #
+def salva_parametri_test(
+    gara_id: str,
+    piloti: list[str],
+    ore: float,
+    pit_minimo: int,
+    stint_min_min: float,
+    stint_max_min: float,
+    pit_max_s: float,
+    bot_n: int = 5,
+    giro_veloce_s: float = 55.0,
+    giro_lento_s: float = 68.0,
+    giro_nostro_s: float = 60.0,
+) -> None:
+    def fn(g):
+        g["piloti"] = list(piloti)
+        g["ore"] = float(ore)
+        g["pit_minimo"] = int(pit_minimo)
+        g["test"] = {
+            "stint_min_min": float(stint_min_min),
+            "stint_max_min": float(stint_max_min),
+            "pit_max_s": float(pit_max_s),
+            "bot_n": int(bot_n),
+            "giro_veloce_s": float(giro_veloce_s),
+            "giro_lento_s": float(giro_lento_s),
+            "giro_nostro_s": float(giro_nostro_s),
+        }
+    _aggiorna(gara_id, fn)
+
+
 def salva_piano(gara_id: str, piano: dict) -> None:
     gare_all = load_gare()
     gara = trova(gare_all, gara_id)
@@ -711,6 +766,19 @@ def aggiungi_penalita(gara_id: str, pilota: str, tipo: str, valore: float, motiv
                 "ora": datetime.now().isoformat(timespec="seconds"),
             }
         )
+    _aggiorna(gara_id, fn)
+
+
+def aggiungi_evento_test(gara_id: str, evento: dict) -> None:
+    """Evento simulato della gara TEST: ritardo (sorpasso o penalità), giro o sosta di un bot."""
+    def fn(g):
+        g.setdefault("test_eventi", []).append({**evento, "id": uuid.uuid4().hex[:8]})
+    _aggiorna(gara_id, fn)
+
+
+def azzera_eventi_test(gara_id: str) -> None:
+    def fn(g):
+        g["test_eventi"] = []
     _aggiorna(gara_id, fn)
 
 
