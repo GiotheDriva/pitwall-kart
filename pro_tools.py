@@ -331,6 +331,8 @@ def render_planner(
             args=(gid, piano_salvato),
             help="Il muretto mostrerà chi è in pista e il tempo al prossimo cambio.",
         )
+        salvato = (gara.get("piano") or {}).get("salvato_il")
+        st.caption(f"Ultimo piano pinnato: {salvato or 'mai'}")
 
     fig = go.Figure()
     for i, driver in enumerate(roster):

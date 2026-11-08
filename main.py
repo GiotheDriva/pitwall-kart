@@ -980,7 +980,7 @@ def log_apex_comments(snapshot: dict) -> None:
             ):
                 notify(f"Penalità del team: {traduci_apex(item['text'])}", "team")
             else:
-                notify(f"Penalità di un altro team: {traduci_apex(item['text'])}", "penalita")
+                notify(f"Penalità di un altro team: {traduci_apex(item['text'])}", "penalita_altri")
     del seen[:-500]
 
 
@@ -1764,6 +1764,8 @@ def record_fleet(snapshot: dict) -> None:
                 f["ai_box_da"] = time.time()  # entrata ai box: resta dentro fino al tempo di sosta
                 if key == _mio_kart():
                     st.session_state["_pit_auto_pendente"] = True  # il nostro kart è entrato ai box
+                else:
+                    notify(f"Ai box: kart {key} · {f.get('team') or '—'}", "pit_altri")
                 f["soste"].append(
                     {"giro": laps, "totale": pits, "durata": row.get("last_pit", ""), "orario": now}
                 )
@@ -2028,8 +2030,24 @@ def render_classifica_sotto() -> None:
             st.info("Nessuna riga ricevuta ancora.")
 
 
+# Notifiche che si possono attivare o spegnere dalle Impostazioni: (chiave, etichetta, tipo interno).
+NOTIFICHE_CONFIG = [
+    ("notif_pit_mio", "Pit del nostro kart (entrata ai box)", "pit"),
+    ("notif_pit_altri", "Pit degli altri kart (entrata ai box)", "pit_altri"),
+    ("notif_posizione", "Cambi di posizione del nostro kart", "pos"),
+    ("notif_best", "Nuovo best lap del nostro kart", "best"),
+    ("notif_penalita_mie", "Penalità del nostro kart", "penalita"),
+    ("notif_penalita_team", "Penalità del team", "team"),
+    ("notif_penalita_altri", "Penalità degli altri team", "penalita_altri"),
+]
+_CHIAVE_PER_TIPO = {tipo: chiave for chiave, _, tipo in NOTIFICHE_CONFIG}
+
+
 def notify(text: str, kind: str = "info") -> None:
     """Notifica importante per il nostro kart o il team: compare in alto a destra e resta nella campanella."""
+    chiave = _CHIAVE_PER_TIPO.get(kind)
+    if chiave and not st.session_state.get(chiave, True):
+        return  # disattivata dalle Impostazioni
     items = st.session_state.setdefault("notifiche", [])
     seq = st.session_state.get("notifiche_seq", 0) + 1
     st.session_state["notifiche_seq"] = seq
@@ -2298,6 +2316,15 @@ with settings_tab:
         )
     elif gara_s:
         st.success("Gara conclusa. Il report è nel calendario, con il tasto ℹ️.")
+
+    st.divider()
+    st.subheader("Notifiche")
+    st.caption(
+        "Scegli cosa ti avvisa durante la gara. Vale per questa sessione: "
+        "ricaricando la pagina tornano tutte attive."
+    )
+    for chiave, etichetta, _tipo in NOTIFICHE_CONFIG:
+        st.toggle(etichetta, value=True, key=chiave)
 
 with notebook_tab:
     st.subheader("Taccuino tecnico")

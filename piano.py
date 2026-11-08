@@ -154,6 +154,10 @@ def render_card(gara: dict, race_remaining: float | None, azioni) -> None:
         _controlli(gara, elapsed, durata_s, None, azioni)
         return
 
+    st.caption(
+        f"Piano pinnato alle {piano.get('salvato_il') or '—'} · "
+        f"{len(piano.get('durate_stint') or [])} stint personalizzati"
+    )
     if elapsed <= 0:
         st.info("In attesa del via: la strategia parte quando parte la gara (Avvia gara o countdown Apex).")
 

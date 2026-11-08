@@ -602,7 +602,8 @@ def salva_piano(gara_id: str, piano: dict) -> None:
     gare_all = load_gare()
     gara = trova(gare_all, gara_id)
     if gara:
-        gara["piano"] = piano
+        # Orario del pin: serve a verificare che il muretto stia usando l'ultimo piano salvato.
+        gara["piano"] = {**piano, "salvato_il": datetime.now().strftime("%H:%M:%S")}
         save_gare(gare_all)
 
 
