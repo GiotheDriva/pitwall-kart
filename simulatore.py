@@ -1,10 +1,13 @@
 """Campo di gara simulato per le gare TEST.
 
-Il nostro kart e i bot girano con passi, errori e soste diversi. Lo snapshot ha la
-stessa forma di quello del live timing Apex: classifica, sorpassi, soste e
+I piloti/team inseriti nelle impostazioni sono i kart della gara (uno per riga, kart 1, 2, ...).
+Il kart scelto in "Chi sono io" è il nostro: su di lui finiscono i pit e le penalità reali.
+Gli altri sono bot con passo tra il giro migliore e il peggiore.
+
+Lo snapshot ha la stessa forma di quello del live timing Apex: classifica, sorpassi, soste e
 notifiche funzionano senza modifiche al resto del muretto.
 
-Tutto è deterministico: stessi parametri, stessi eventi e stesso id gara danno sempre gli stessi giri.
+Tutto è deterministico: stessi parametri, stessi nomi, stessi eventi danno sempre gli stessi giri.
 
 Eventi simulati (gara["test_eventi"]), ognuno con kart, tipo, t (s di gara) e valore:
 - "ritardo": secondi persi nel giro in corso (sorpasso subito, penalità su un bot)
@@ -20,7 +23,6 @@ from itertools import accumulate
 NUMERO_NOSTRO = "1"
 
 PREDEFINITI = {
-    "bot_n": 5,
     "giro_veloce_s": 55.0,   # giro migliore a cui puntano i bot
     "giro_lento_s": 68.0,    # giro peggiore: i bot più scarsi
     "giro_nostro_s": 60.0,   # passo del nostro kart nella simulazione
@@ -36,7 +38,6 @@ def impostazioni(test: dict | None) -> dict:
     veloce, lento = sorted((float(t["giro_veloce_s"]), float(t["giro_lento_s"])))
     stint_min, stint_max = sorted((float(t["stint_min_min"]) * 60, float(t["stint_max_min"]) * 60))
     return {
-        "bot_n": max(0, min(10, int(t["bot_n"]))),
         "giro_veloce_s": max(20.0, veloce),
         "giro_lento_s": max(20.0, lento),
         "giro_nostro_s": max(20.0, float(t["giro_nostro_s"])),
@@ -121,45 +122,52 @@ def _kart(numero: str, team: str, fine, tempi, soste) -> dict:
     }
 
 
-def genera_bot(gid: str, imp: dict, durata_s: float, eventi: list[dict] | None = None) -> list[dict]:
-    """Bot con passo tra il giro migliore e il peggiore. Stint e passi restano fissi per id gara."""
-    n = imp["bot_n"]
-    if n <= 0:
+def genera_bot(gid: str, imp: dict, durata_s: float, eventi: list[dict] | None,
+               nomi: list[str], numero_nostro: str) -> list[dict]:
+    """Tutti i kart tranne il nostro. Il passo dipende dalla posizione in lista, quindi resta stabile
+    anche quando cambi il kart scelto in 'Chi sono io'."""
+    n = len(nomi)
+    if n == 0:
         return []
     base = random.Random(f"{gid}:passi")
     # Passi distribuiti su tutta la fascia, in ordine casuale: ci sono bot quasi perfetti e bot scarsi.
     quote = [(i + base.random()) / n for i in range(n)]
     base.shuffle(quote)
     bot = []
-    for k in range(n):
-        numero = str(k + 2)
-        rng = random.Random(f"{gid}:bot:{k}")
-        passo = imp["giro_veloce_s"] + (imp["giro_lento_s"] - imp["giro_veloce_s"]) * quote[k]
+    for i, nome in enumerate(nomi):
+        numero = str(i + 1)
+        if numero == numero_nostro:
+            continue
+        rng = random.Random(f"{gid}:bot:{numero}")
+        passo = imp["giro_veloce_s"] + (imp["giro_lento_s"] - imp["giro_veloce_s"]) * quote[i]
         fine, tempi, soste = _percorso(
             rng, durata_s, passo, _eventi_di(eventi, numero),
             (imp["stint_min_s"], imp["stint_max_s"], imp["pit_max_s"]),
         )
-        bot.append(_kart(numero, f"Bot {k + 1}", fine, tempi, soste))
+        bot.append(_kart(numero, nome, fine, tempi, soste))
     return bot
 
 
-def campo(gara: dict, bot: list[dict], pit_nostri: list[tuple[float, float]]) -> list[dict]:
-    """Tutti i kart della gara TEST, nostro per primo.
+def campo(gara: dict, bot: list[dict], pit_nostri: list[tuple[float, float]], numero_nostro: str) -> list[dict]:
+    """Tutti i kart della gara TEST, il nostro per primo.
 
     bot: risultato di genera_bot (può essere tenuto in cache).
     pit_nostri: (ingresso ai box, durata sosta) delle soste reali del nostro kart.
     """
     imp = impostazioni(gara.get("test"))
     durata_s = durata_gara_s(gara)
+    nomi = gara.get("piloti") or []
+    idx = int(numero_nostro) - 1
+    nome_nostro = nomi[idx] if 0 <= idx < len(nomi) else "Nostro kart"
     ev = sorted(
         [(float(t), "sosta", float(d)) for t, d in pit_nostri]
-        + _eventi_di(gara.get("test_eventi"), NUMERO_NOSTRO),
+        + _eventi_di(gara.get("test_eventi"), numero_nostro),
         key=lambda e: e[0],
     )
     fine, tempi, soste = _percorso(
-        random.Random(f"{gara['id']}:nostro"), durata_s, imp["giro_nostro_s"], ev
+        random.Random(f"{gara['id']}:nostro:{numero_nostro}"), durata_s, imp["giro_nostro_s"], ev
     )
-    nostro = _kart(NUMERO_NOSTRO, gara.get("team") or "TEST", fine, tempi, soste)
+    nostro = _kart(numero_nostro, nome_nostro, fine, tempi, soste)
     return [nostro] + bot
 
 

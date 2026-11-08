@@ -123,7 +123,6 @@ TEST_PREDEFINITI = {
     "stint_min_min": 10.0,
     "stint_max_min": 40.0,
     "pit_max_s": 180.0,
-    "bot_n": 5,
     "giro_veloce_s": 55.0,   # giro migliore a cui puntano i bot
     "giro_lento_s": 68.0,    # giro peggiore: i bot più scarsi
     "giro_nostro_s": 60.0,   # passo del nostro kart nella simulazione
@@ -632,7 +631,6 @@ def salva_parametri_test(
     stint_min_min: float,
     stint_max_min: float,
     pit_max_s: float,
-    bot_n: int = 5,
     giro_veloce_s: float = 55.0,
     giro_lento_s: float = 68.0,
     giro_nostro_s: float = 60.0,
@@ -645,11 +643,17 @@ def salva_parametri_test(
             "stint_min_min": float(stint_min_min),
             "stint_max_min": float(stint_max_min),
             "pit_max_s": float(pit_max_s),
-            "bot_n": int(bot_n),
             "giro_veloce_s": float(giro_veloce_s),
             "giro_lento_s": float(giro_lento_s),
             "giro_nostro_s": float(giro_nostro_s),
         }
+    _aggiorna(gara_id, fn)
+
+
+def salva_piloti(gara_id: str, piloti: list[str]) -> None:
+    """Piloti/team che correranno nella gara TEST: diventano i kart della classifica."""
+    def fn(g):
+        g["piloti"] = list(piloti)
     _aggiorna(gara_id, fn)
 
 

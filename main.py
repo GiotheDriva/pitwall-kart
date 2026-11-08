@@ -1266,14 +1266,31 @@ def gara_test_aperta() -> dict | None:
     return gara if gara and gara.get("test") else None
 
 
-def campo_test(gara: dict, imp: dict) -> list[dict]:
-    """Bot della gara TEST: rigenerati solo quando cambiano parametri o eventi simulati."""
+def numero_nostro_test() -> str:
+    """Numero del nostro kart nel campo TEST: quello scelto in 'Chi sono io'."""
+    m = re.match(r"Kart (\d+) ·", st.session_state.get("selected_pilot") or "")
+    return m.group(1) if m else simulatore.NUMERO_NOSTRO
+
+
+def _salva_nomi_test(gid: str) -> None:
+    """Piloti/team della gara TEST: si salvano appena esci dal campo di testo."""
+    testo = st.session_state.get(f"test_nomi_{gid}") or ""
+    nomi = [n.strip() for n in testo.splitlines() if n.strip()] or ["Pilota 1"]
+    gare.salva_piloti(gid, nomi)
+
+
+def campo_test(gara: dict, imp: dict, numero_nostro: str) -> list[dict]:
+    """Bot della gara TEST: rigenerati solo quando cambiano parametri, nomi, kart scelto o eventi."""
     durata_s = simulatore.durata_gara_s(gara)
+    nomi = list(gara.get("piloti") or [])
     eventi = gara.get("test_eventi") or []
-    chiave = (gara["id"], durata_s, tuple(sorted(imp.items())), repr(eventi))
+    chiave = (gara["id"], durata_s, tuple(sorted(imp.items())), tuple(nomi), numero_nostro, repr(eventi))
     cache = st.session_state.get("_campo_test")
     if not cache or cache.get("chiave") != chiave:
-        cache = {"chiave": chiave, "bot": simulatore.genera_bot(gara["id"], imp, durata_s, eventi)}
+        cache = {
+            "chiave": chiave,
+            "bot": simulatore.genera_bot(gara["id"], imp, durata_s, eventi, nomi, numero_nostro),
+        }
         st.session_state["_campo_test"] = cache
     return cache["bot"]
 
@@ -1287,7 +1304,8 @@ def karts_test(gara: dict) -> list[dict]:
         (float(tempo), pit_sec + per_pit[i])
         for i, tempo in enumerate(gara.get("pit_eseguiti") or [])
     ]
-    return simulatore.campo(gara, campo_test(gara, imp), pit_nostri)
+    numero = numero_nostro_test()
+    return simulatore.campo(gara, campo_test(gara, imp, numero), pit_nostri, numero)
 
 
 def snapshot_test(gara: dict) -> dict:
@@ -1299,6 +1317,8 @@ def render_simulazioni_test(gara: dict) -> None:
     """Pulsanti per forzare sorpassi, giri, soste e penalità sul campo simulato della gara TEST."""
     gid = gara["id"]
     karts = karts_test(gara)
+    nostro = numero_nostro_test()
+    nome_nostro = next((k["team"] for k in karts if k["numero"] == nostro), "Nostro kart")
     t = piano.tempo_gara(gara, None)
     pit_sec = float((gara.get("piano") or {}).get("pit_sec") or 90)
     scelte = {f"Kart {k['numero']} · {k['team']}": k["numero"] for k in karts}
@@ -1307,7 +1327,10 @@ def render_simulazioni_test(gara: dict) -> None:
             f"Eventi al tempo di gara {t / 60:.1f} min. Restano salvati nella gara di prova: "
             "'Azzera' li toglie."
         )
-        etichetta = st.selectbox("Kart", list(scelte), key=f"sim_kart_{gid}")
+        etichetta = st.selectbox(
+            "Kart", list(scelte), key=f"sim_kart_{gid}",
+            index=next((i for i, num in enumerate(scelte.values()) if num == nostro), 0),
+        )
         numero = scelte[etichetta]
         c1, c2 = st.columns(2)
         if c1.button("🔀 Sorpasso sul kart davanti", key=f"sim_sorpasso_{gid}", use_container_width=True,
@@ -1339,14 +1362,14 @@ def render_simulazioni_test(gara: dict) -> None:
                     st.rerun()
         with f2:
             with st.form(f"sim_pit_{gid}"):
-                if numero == simulatore.NUMERO_NOSTRO:
+                if numero == nostro:
                     st.caption("Il nostro kart usa il Pit ora reale e la sosta del pianificatore.")
                     durata_pit = pit_sec
                 else:
                     durata_pit = st.number_input("Durata sosta (s)", 0.0, 900.0, pit_sec, 5.0,
                                                  key=f"sim_pit_s_{gid}")
                 if st.form_submit_button("🛠 Pit ora", use_container_width=True):
-                    if numero == simulatore.NUMERO_NOSTRO:
+                    if numero == nostro:
                         if gare.registra_pit(gid, t):
                             st.rerun()
                         st.warning("Pit già registrato da meno di un minuto.")
@@ -1363,8 +1386,8 @@ def render_simulazioni_test(gara: dict) -> None:
             if st.form_submit_button("⚠️ Applica penalità"):
                 if not motivo.strip():
                     st.warning("Scrivi il motivo della penalità.")
-                elif numero == simulatore.NUMERO_NOSTRO:
-                    gare.aggiungi_penalita(gid, "Nostro kart", "secondi", secondi_pen, motivo)
+                elif numero == nostro:
+                    gare.aggiungi_penalita(gid, nome_nostro, "secondi", secondi_pen, motivo)
                     notify(f"Penalità del nostro kart: +{secondi_pen:g} s · {motivo.strip()}", "penalita")
                     st.rerun()
                 else:
@@ -2475,35 +2498,41 @@ with settings_tab:
         gid_t = gara_s["id"]
         piloti_att = gara_s.get("piloti") or []
         test_att = gara_s.get("test") or {}
+        st.caption("Piloti o team che correranno: una riga per kart. Si salvano da soli quando esci dal campo.")
+        st.text_area(
+            "Piloti / team (uno per riga)",
+            value="\n".join(piloti_att),
+            height=160,
+            key=f"test_nomi_{gid_t}",
+            on_change=_salva_nomi_test,
+            args=(gid_t,),
+        )
+        piano_nomi = (gara_s.get("piano") or {}).get("piloti")
+        if piano_nomi and piano_nomi != piloti_att:
+            st.warning(
+                "Il piano pinnato sul muretto usa ancora i nomi di prima: "
+                "nel Pianificatore premi di nuovo **📌 Usa questo piano per il muretto**."
+            )
         with st.form(f"form_test_{gid_t}"):
             ore_test = st.number_input("Durata gara (ore)", 0.25, 24.0, float(gara_s.get("ore") or 1.0), 0.25, key=f"test_ore_{gid_t}")
-            nomi = st.text_area("Nomi dei piloti (uno per riga, quanti ne vuoi)", value="\n".join(piloti_att), height=110, key=f"test_nomi_{gid_t}")
             c3, c4, c5, c6 = st.columns(4)
             pit_test = c3.number_input("Pit obbligatori", 0, 50, int(gara_s.get("pit_minimo") or 0), 1, key=f"test_pit_{gid_t}")
             min_test = c4.number_input("Minimo in pista (min)", 1.0, 240.0, float(test_att.get("stint_min_min", 10.0)), 1.0, key=f"test_min_{gid_t}")
             max_test = c5.number_input("Massimo in pista (min)", 1.0, 240.0, float(test_att.get("stint_max_min", 40.0)), 1.0, key=f"test_max_{gid_t}")
             pitmax_test = c6.number_input("Massimo in pit (s)", 0.0, 900.0, float(test_att.get("pit_max_s", 180.0)), 5.0, key=f"test_pitmax_{gid_t}")
             st.caption("Campo simulato: ogni bot ha un passo tra il giro migliore e il peggiore, con errori e soste.")
-            g1, g2, g3, g4 = st.columns(4)
-            bot_test = g1.number_input("Numero di bot", 0, 10, int(test_att.get("bot_n", 5)), 1, key=f"test_bot_{gid_t}")
+            g2, g3, g4 = st.columns(3)
             veloce_test = g2.number_input("Giro migliore dei bot (s)", 20.0, 300.0, float(test_att.get("giro_veloce_s", 55.0)), 0.5, key=f"test_veloce_{gid_t}")
             lento_test = g3.number_input("Giro peggiore dei bot (s)", 20.0, 300.0, float(test_att.get("giro_lento_s", 68.0)), 0.5, key=f"test_lento_{gid_t}")
             nostro_test = g4.number_input("Passo del nostro kart (s)", 20.0, 300.0, float(test_att.get("giro_nostro_s", 60.0)), 0.5, key=f"test_nostro_{gid_t}")
             salva_test = st.form_submit_button("Salva parametri di test", type="primary")
         if salva_test:
-            nomi_lista = [n.strip() for n in nomi.splitlines() if n.strip()] or ["Pilota 1"]
             gare.salva_parametri_test(
-                gid_t, nomi_lista, ore_test, pit_test, min_test, max_test, pitmax_test,
-                bot_n=int(bot_test), giro_veloce_s=float(veloce_test),
-                giro_lento_s=float(lento_test), giro_nostro_s=float(nostro_test),
+                gid_t, piloti_att, ore_test, pit_test, min_test, max_test, pitmax_test,
+                giro_veloce_s=float(veloce_test), giro_lento_s=float(lento_test),
+                giro_nostro_s=float(nostro_test),
             )
-            st.success(f"Salvati {len(nomi_lista)} piloti: il Pianificatore li usa subito.")
-            piloti_pinnati = (gara_s.get("piano") or {}).get("piloti")
-            if piloti_pinnati and piloti_pinnati != nomi_lista:
-                st.warning(
-                    "Il piano pinnato sul muretto usa ancora i nomi di prima: "
-                    "nel Pianificatore premi di nuovo **📌 Usa questo piano per il muretto**."
-                )
+            st.success("Parametri salvati: il campo e il muretto usano i nuovi valori.")
 
     st.divider()
     st.subheader("Notifiche")
