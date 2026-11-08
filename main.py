@@ -914,6 +914,42 @@ def is_penalty_text(text: str) -> bool:
     return any(word in low for word in PENALTY_WORDS)
 
 
+# Traduzione delle parole ricorrenti nei messaggi Apex. Le chiavi più lunghe vincono.
+TRADUZIONI_APEX = {
+    "straf": "penalità", "strafe": "penalità", "strafzeit": "penalità di tempo",
+    "penalty": "penalità", "penalties": "penalità", "penalidad": "penalità",
+    "penalidade": "penalità", "pénalité": "penalità", "penalización": "penalizzazione",
+    "penalizacion": "penalizzazione", "sanción": "sanzione", "sancion": "sanzione",
+    "avertissement": "avviso", "aviso": "avviso", "waarschuwing": "avviso",
+    "warning": "avviso", "verwarnung": "ammonizione",
+    "pit tijd": "tempo pit", "pit time": "tempo pit", "pit-zeit": "tempo pit",
+    "tiempo de pit": "tempo pit", "tiempo pit": "tempo pit", "temps pit": "tempo pit",
+    "lap time": "tempo giro", "tijd": "tempo", "zeit": "tempo", "tiempo": "tempo",
+    "temps": "tempo", "time": "tempo",
+    "rondes": "giri", "ronde": "giro", "runden": "giri", "runde": "giro",
+    "vueltas": "giri", "vuelta": "giro", "laps": "giri", "lap": "giro",
+    "tours": "giri", "tour": "giro",
+    "sekunden": "secondi", "seconds": "secondi", "secondes": "secondi",
+    "segundos": "secondi", "second": "secondo", "sek": "s", "sec": "s", "seg": "s",
+    "stop and go": "stop and go", "stop-and-go": "stop and go",
+    "drive through": "drive through", "drive-through": "drive through",
+}
+_RE_TRADUZIONI_APEX = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in sorted(TRADUZIONI_APEX, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def traduci_apex(text: str) -> str:
+    """Traduce in italiano le parole note di un messaggio Apex. Il resto resta com'è."""
+    if not text:
+        return ""
+    out = _RE_TRADUZIONI_APEX.sub(lambda m: TRADUZIONI_APEX[m.group(0).lower()], text)
+    out = re.sub(r"(\d)\s*s\b", r"\1 s", out)
+    out = re.sub(r"\s+:", ":", out)
+    return out[:1].upper() + out[1:]
+
+
 def is_mine(text: str, mine: dict) -> bool:
     kart = str(mine.get("kart") or "").strip()
     team = str(mine.get("team") or "").strip()
@@ -932,19 +968,19 @@ def log_apex_comments(snapshot: dict) -> None:
         seen.append(key)
         icona = "⚠️" if is_penalty_text(item["text"]) else "💬"
         ora = f"{item['time']} · " if item["time"] else ""
-        add_event(f"{icona} Apex {ora}{item['text']}")
+        add_event(f"{icona} Apex {ora}{traduci_apex(item['text'])}")
         if is_penalty_text(item["text"]):
             mine = st.session_state.get("_apex_mine") or {}
             if is_mine(item["text"], mine):
-                notify(f"Penalità del nostro kart: {item['text']}", "penalita")
+                notify(f"Penalità del nostro kart: {traduci_apex(item['text'])}", "penalita")
             elif mine.get("team") and any(
                 r.get("team") == mine.get("team")
                 and is_mine(item["text"], {"kart": r.get("kart", ""), "team": ""})
                 for r in snapshot.get("rows", [])
             ):
-                notify(f"Penalità del team: {item['text']}", "team")
+                notify(f"Penalità del team: {traduci_apex(item['text'])}", "team")
             else:
-                notify(f"Penalità di un altro team: {item['text']}", "penalita")
+                notify(f"Penalità di un altro team: {traduci_apex(item['text'])}", "penalita")
     del seen[:-500]
 
 
@@ -2165,7 +2201,7 @@ def render_penalties() -> None:
     altri = [c for c in items if c not in miei]
 
     def riga(c: dict) -> str:
-        return f"{c['time'] + ' · ' if c['time'] else ''}{c['text']}"
+        return f"{c['time'] + ' · ' if c['time'] else ''}{traduci_apex(c['text'])}"
 
     st.subheader("Le mie penalità e avvisi")
     if not miei:
@@ -2177,7 +2213,7 @@ def render_penalties() -> None:
     if not altri:
         st.caption("Nessun altro avviso.")
     for c in altri:
-        st.markdown(f"- {riga(c)}")
+        st.markdown(f"- {riga(c)}  \n  *originale: {c['text']}*")
 
 
 if penalty_tab is not None:
