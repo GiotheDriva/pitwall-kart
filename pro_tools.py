@@ -298,6 +298,17 @@ def render_planner(
             f"la durata massima di ciascuno è {max_stint:.1f} min."
         )
 
+    test = (gara or {}).get("test") if gara else None
+    if test:
+        lunghi = [s["stint"] for s in stints if s["durata"] > test.get("stint_max_min", 1e9) + 1e-6]
+        corti = [s["stint"] for s in stints[:-1] if s["durata"] < test.get("stint_min_min", 0) - 1e-6]
+        if lunghi:
+            st.warning(f"Stint oltre il massimo in pista ({test.get('stint_max_min'):g} min): {', '.join(map(str, lunghi))}")
+        if corti:
+            st.warning(f"Stint sotto il minimo in pista ({test.get('stint_min_min'):g} min): {', '.join(map(str, corti))}")
+        if pit_sec > test.get("pit_max_s", 1e9):
+            st.warning(f"Sosta prevista ({pit_sec} s) oltre il massimo in pit ({test.get('pit_max_s'):g} s)")
+
     if guida_max:
         totali = plan.groupby("Pilota")["Durata (min)"].sum()
         oltre = totali[totali > guida_max]
