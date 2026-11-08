@@ -901,7 +901,12 @@ def record_apex_history(row: dict, previous: dict | None) -> None:
     del history[:-300]
 
 
-PENALTY_WORDS = ("penal", "sanzion", "ammonizion", "avviso", "warning", "attenzione", "stop and go", "drive through")
+# Parole che indicano una penalità o un avviso, anche nelle lingue dei team Apex
+# (IT, EN, ES, FR, DE, NL, PT…). Il confronto è sul testo in minuscolo.
+PENALTY_WORDS = (
+    "penal", "pénal", "sanzion", "sanci", "straf", "ammonizion", "avviso", "warning",
+    "attenzione", "stop and go", "stop-and-go", "stop & go", "drive through", "drive-through",
+)
 
 
 def is_penalty_text(text: str) -> bool:
@@ -938,6 +943,8 @@ def log_apex_comments(snapshot: dict) -> None:
                 for r in snapshot.get("rows", [])
             ):
                 notify(f"Penalità del team: {item['text']}", "team")
+            else:
+                notify(f"Penalità di un altro team: {item['text']}", "penalita")
     del seen[:-500]
 
 
