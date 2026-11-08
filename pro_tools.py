@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+import traceback
 from datetime import datetime
 
 import pandas as pd
@@ -157,6 +158,19 @@ def render_planner(
     gare_list: list[dict] | None = None,
     default_id: str | None = None,
     on_save=None,
+) -> None:
+    """Pianificatore: se un calcolo fallisce mostra l'errore invece di lasciare la pagina bianca."""
+    try:
+        _render_planner(gare_list, default_id, on_save)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Il pianificatore non è riuscito a calcolare il piano: {exc}")
+        st.code(traceback.format_exc())
+
+
+def _render_planner(
+    gare_list: list[dict] | None,
+    default_id: str | None,
+    on_save,
 ) -> None:
     section_header(
         "Strategia",
@@ -375,7 +389,8 @@ def render_planner(
             "Pilota": st.column_config.SelectboxColumn("Pilota", options=roster, required=True),
             "Note": st.column_config.TextColumn("Note", width="large"),
         },
-        key=f"pl_editor_{gid}",
+        # La chiave cambia con la forma del piano: così la tabella non riusa modifiche di righe che non esistono più.
+        key=f"pl_editor_{gid}_{len(plan)}_{stint_min}_{race_hours}_{pit_sec}_{'|'.join(roster)}",
     )
     short = plan.loc[plan["_ok"] == False, "Stint"].tolist()  # noqa: E712
     if short:
