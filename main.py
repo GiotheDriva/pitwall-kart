@@ -1279,33 +1279,48 @@ def _salva_nomi_test(gid: str) -> None:
     gare.salva_piloti(gid, nomi)
 
 
-def campo_test(gara: dict, imp: dict, numero_nostro: str) -> list[dict]:
-    """Bot della gara TEST: rigenerati solo quando cambiano parametri, nomi, kart scelto o eventi."""
-    durata_s = simulatore.durata_gara_s(gara)
-    nomi = list(gara.get("piloti") or [])
-    eventi = gara.get("test_eventi") or []
-    chiave = (gara["id"], durata_s, tuple(sorted(imp.items())), tuple(nomi), numero_nostro, repr(eventi))
-    cache = st.session_state.get("_campo_test")
-    if not cache or cache.get("chiave") != chiave:
-        cache = {
-            "chiave": chiave,
-            "bot": simulatore.genera_bot(gara["id"], imp, durata_s, eventi, nomi, numero_nostro),
-        }
-        st.session_state["_campo_test"] = cache
-    return cache["bot"]
-
-
 def karts_test(gara: dict) -> list[dict]:
-    """Tutti i kart della gara TEST, con le soste reali del nostro kart e gli eventi simulati."""
-    imp = simulatore.impostazioni(gara.get("test"))
+    """Tutti i kart della gara TEST, con la gara simulata per intero.
+
+    Si ricalcola solo quando cambiano nomi, parametri, seme, pit reali o eventi manuali.
+    """
+    numero = numero_nostro_test()
     pit_sec = float((gara.get("piano") or {}).get("pit_sec") or 90)
     per_pit, _ = piano.extra_penalita(gara)
     pit_nostri = [
         (float(tempo), pit_sec + per_pit[i])
         for i, tempo in enumerate(gara.get("pit_eseguiti") or [])
     ]
-    numero = numero_nostro_test()
-    return simulatore.campo(gara, campo_test(gara, imp, numero), pit_nostri, numero)
+    chiave = repr((
+        gara.get("id"), gara.get("test_seme"), gara.get("test"), gara.get("piloti"),
+        gara.get("test_eventi"), simulatore.durata_gara_s(gara), numero, pit_nostri,
+    ))
+    cache = st.session_state.get("_campo_test")
+    if not cache or cache.get("chiave") != chiave:
+        cache = {"chiave": chiave, "karts": simulatore.genera_campo(gara, numero, pit_nostri)}
+        st.session_state["_campo_test"] = cache
+    return cache["karts"]
+
+
+def _registra_eventi_test(snapshot: dict) -> None:
+    """Eventi della gara simulata (penalità, guasti, soste anomale) nella lista eventi e nelle notifiche."""
+    eventi = snapshot.get("eventi_simulati") or []
+    visti = st.session_state.get("_test_eventi_visti")
+    if visti is None:
+        # Prima apertura: non rigiochiamo la storia della gara, registriamo solo da qui in avanti.
+        st.session_state["_test_eventi_visti"] = {e["id"] for e in eventi}
+        return
+    nostro = numero_nostro_test()
+    for e in eventi:
+        if e["id"] in visti:
+            continue
+        visti.add(e["id"])
+        add_event(f"🎲 {e['testo']}")
+        if "Penalità" in e["testo"]:
+            if e["kart"] == nostro:
+                notify(f"Penalità del nostro kart: {e['testo']}", "penalita")
+            else:
+                notify(f"Penalità di un altro team: {e['testo']}", "penalita_altri")
 
 
 def snapshot_test(gara: dict) -> dict:
@@ -1428,46 +1443,56 @@ with st.sidebar:
         help="Apex Timing usa il flusso live; gli altri siti richiedono tabelle HTML pubbliche.",
     )
 
-    if st.button("Cerca Piloti in pista", use_container_width=True):
-        if not timing_url.strip():
-            st.error("Inserisci prima l'URL del Live Timing.")
-        else:
-            try:
-                with st.spinner("Lettura del Live Timing…"):
-                    if is_apex_timing_url(timing_url):
-                        snapshot = fetch_apex_snapshot(timing_url.strip())
-                        discovered_pilots, identities = apex_pilot_options(snapshot)
-                        provider = "apex"
-                    else:
-                        page = fetch_public_html(timing_url)
-                        discovered_pilots = extract_pilots(page)
-                        snapshot = None
-                        identities = {}
-                        provider = "html"
+    def carica_timing(url: str, silenzioso: bool = False) -> None:
+        """Legge il Live Timing della gara reale e compila la lista "Chi sono io"."""
+        try:
+            with st.spinner("Lettura del Live Timing…"):
+                if is_apex_timing_url(url):
+                    snapshot = fetch_apex_snapshot(url.strip())
+                    discovered_pilots, identities = apex_pilot_options(snapshot)
+                    provider = "apex"
+                else:
+                    page = fetch_public_html(url)
+                    discovered_pilots = extract_pilots(page)
+                    snapshot = None
+                    identities = {}
+                    provider = "html"
 
-                st.session_state["pilots"] = discovered_pilots
-                st.session_state["timing_provider"] = provider
-                st.session_state["apex_pilot_identities"] = identities
-                st.session_state["apex_snapshot"] = snapshot
-                if st.session_state.get("selected_pilot") not in discovered_pilots:
-                    st.session_state["selected_pilot"] = None
-                if discovered_pilots:
+            st.session_state["pilots"] = discovered_pilots
+            st.session_state["timing_provider"] = provider
+            st.session_state["apex_pilot_identities"] = identities
+            st.session_state["apex_snapshot"] = snapshot
+            if st.session_state.get("selected_pilot") not in discovered_pilots:
+                st.session_state["selected_pilot"] = None
+            if discovered_pilots:
+                if not silenzioso:
                     st.success(
                         f"Trovati {len(discovered_pilots)} piloti/team "
                         f"{'sul Live Timing Apex' if provider == 'apex' else 'nelle tabelle HTML'}."
                     )
-                else:
-                    st.warning(
-                        "Nessun nome trovato nelle tabelle HTML. "
-                        "La pagina potrebbe caricare i dati solo con JavaScript."
-                    )
-            except Exception as exc:
-                st.session_state["pilots"] = []
-                st.session_state["selected_pilot"] = None
-                st.session_state["timing_provider"] = None
-                st.session_state["apex_pilot_identities"] = {}
-                st.session_state["apex_snapshot"] = None
-                st.error(f"Impossibile leggere il Live Timing: {exc}")
+            else:
+                st.warning(
+                    "Nessun nome trovato nelle tabelle HTML. "
+                    "La pagina potrebbe caricare i dati solo con JavaScript."
+                )
+        except Exception as exc:
+            st.session_state["pilots"] = []
+            st.session_state["selected_pilot"] = None
+            st.session_state["timing_provider"] = None
+            st.session_state["apex_pilot_identities"] = {}
+            st.session_state["apex_snapshot"] = None
+            st.error(f"Impossibile leggere il Live Timing: {exc}")
+
+    if st.button("Cerca Piloti in pista", use_container_width=True):
+        st.session_state["_auto_cerca"] = False
+        if not timing_url.strip():
+            st.error("Inserisci prima l'URL del Live Timing.")
+        else:
+            carica_timing(timing_url)
+    elif st.session_state.get("_auto_cerca") and timing_url.strip() and not gara_test_aperta():
+        # Gara reale appena aperta: il link salvato nella gara viene letto da solo.
+        st.session_state["_auto_cerca"] = False
+        carica_timing(timing_url, silenzioso=True)
 
     gara_test = gara_test_aperta()
     if gara_test:
@@ -2171,6 +2196,13 @@ def render_analysis(provider: str | None, history_limit: int) -> None:
 @st.fragment(run_every=5)
 def render_classifica_sotto() -> None:
     """Classifica live sotto le tab: resta aggiornata in qualunque sezione."""
+    if st.session_state.get("timing_provider") == "apex" and not gara_test_aperta():
+        try:
+            st.session_state["apex_snapshot"] = fetch_apex_snapshot(
+                st.session_state.get("timing_url", ""), wait_seconds=0
+            )
+        except Exception:
+            pass  # si tiene l'ultima classifica ricevuta
     snapshot = st.session_state.get("apex_snapshot")
     if not snapshot or not snapshot.get('rows'):
         return
@@ -2376,181 +2408,4 @@ def render_penalties() -> None:
                 else:
                     azione.button(
                         "↩ Riapri",
-                        key=f"scont_pen_{p['id']}",
-                        on_click=gare.segna_scontata,
-                        args=(gara["id"], p["id"], False),
-                    )
-                cestino.button(
-                    "🗑️",
-                    key=f"del_pen_{p['id']}",
-                    help="Elimina penalità",
-                    on_click=gare.elimina_penalita,
-                    args=(gara["id"], p["id"]),
-                )
-        st.divider()
-
-    mine = st.session_state.get("_apex_mine") or {}
-    items = [
-        c for c in reversed(st.session_state.get("_apex_comments", []))
-        if is_penalty_text(c["text"])
-    ]
-    miei = [c for c in items if is_mine(c["text"], mine)]
-    altri = [c for c in items if c not in miei]
-
-    def riga(c: dict) -> str:
-        return f"{c['time'] + ' · ' if c['time'] else ''}{traduci_apex(c['text'])}"
-
-    st.subheader("Le mie penalità e avvisi")
-    if not miei:
-        st.caption("Nessuna penalità o avviso per il tuo kart.")
-    for c in miei:
-        st.error(riga(c))
-
-    st.subheader("Tutte le altre penalità e avvisi")
-    if not altri:
-        st.caption("Nessun altro avviso.")
-    for c in altri:
-        st.markdown(f"- {riga(c)}  \n  *originale: {c['text']}*")
-
-
-if penalty_tab is not None:
-    with penalty_tab:
-        render_penalties()
-
-if planner_tab is not None:
-    with planner_tab:
-        pro_tools.render_planner(
-            gare.load_gare(),
-            st.session_state.get(gare.VISTA),
-            on_save=gare.salva_piano,
-        )
-
-with sheets_tab:
-    sheet_lap, sheet_boards = st.tabs(["⏱️ Giri", "🎨 Lavagne e schizzi"])
-    with sheet_lap:
-        pro_tools.render_lap_sheet()
-    with sheet_boards:
-        pro_tools.render_boards()
-
-with pit_tab:
-    gara_test_pit = gara_test_aperta()
-    if gara_test_pit:
-        render_simulazioni_test(gara_test_pit)
-    if live_timing and selected_pilot:
-        if (
-            not st.session_state.get("_was_live", False)
-            or st.session_state.get("_session_pilot") != selected_pilot
-        ):
-            if timing_provider in ("apex", "test"):
-                start_apex_session(selected_pilot)
-            else:
-                start_live_session(selected_pilot)
-        st.session_state["_was_live"] = True
-        live_fragment = st.fragment(run_every=float(refresh_interval))(
-            render_live_dashboard
-        )
-        live_fragment(
-            timing_provider,
-            selected_pilot,
-            timing_url,
-            int(max_stint),
-            int(pit_stop_seconds),
-            int(alert_minutes),
-        )
-    else:
-        st.session_state["_was_live"] = False
-        st.info(
-            "Cerca i piloti nella barra laterale, seleziona il tuo kart "
-            "e attiva **Avvia Live Timing**."
-        )
-
-with analysis_tab:
-    analysis_fragment = st.fragment(
-        run_every=max(1.0, float(refresh_interval))
-    )(render_analysis)
-    analysis_fragment(timing_provider, int(history_limit))
-
-with confronto_tab:
-    render_confronto()
-
-with settings_tab:
-    gara_s = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA))
-    st.subheader("Impostazioni gara")
-    if gara_s and gara_s.get("stato") != "conclusa":
-        st.write(
-            "A gara finita premi il pulsante: salvo giri, analisi, pit, penalità e registro "
-            "nella gara e torno al calendario. Il report si apre con ℹ️ accanto alla gara."
-        )
-        st.button(
-            "🏁 Gara conclusa",
-            type="primary",
-            key=f"concludi_{gara_s['id']}",
-            on_click=gare.concludi_gara,
-            args=(gara_s["id"],),
-        )
-    elif gara_s:
-        st.success("Gara conclusa. Il report è nel calendario, con il tasto ℹ️.")
-
-    if gara_s and gara_s.get("test"):
-        st.divider()
-        st.subheader("🧪 Parametri di test")
-        st.caption("Gara di prova: nessun dato reale. Qui imposti piloti, durata, soste e limiti da controllare.")
-        gid_t = gara_s["id"]
-        piloti_att = gara_s.get("piloti") or []
-        test_att = gara_s.get("test") or {}
-        st.caption("Piloti o team che correranno: una riga per kart. Si salvano da soli quando esci dal campo.")
-        st.text_area(
-            "Piloti / team (uno per riga)",
-            value="\n".join(piloti_att),
-            height=160,
-            key=f"test_nomi_{gid_t}",
-            on_change=_salva_nomi_test,
-            args=(gid_t,),
-        )
-        piano_nomi = (gara_s.get("piano") or {}).get("piloti")
-        if piano_nomi and piano_nomi != piloti_att:
-            st.warning(
-                "Il piano pinnato sul muretto usa ancora i nomi di prima: "
-                "nel Pianificatore premi di nuovo **📌 Usa questo piano per il muretto**."
-            )
-        with st.form(f"form_test_{gid_t}"):
-            ore_test = st.number_input("Durata gara (ore)", 0.25, 24.0, float(gara_s.get("ore") or 1.0), 0.25, key=f"test_ore_{gid_t}")
-            c3, c4, c5, c6 = st.columns(4)
-            pit_test = c3.number_input("Pit obbligatori", 0, 50, int(gara_s.get("pit_minimo") or 0), 1, key=f"test_pit_{gid_t}")
-            min_test = c4.number_input("Minimo in pista (min)", 1.0, 240.0, float(test_att.get("stint_min_min", 10.0)), 1.0, key=f"test_min_{gid_t}")
-            max_test = c5.number_input("Massimo in pista (min)", 1.0, 240.0, float(test_att.get("stint_max_min", 40.0)), 1.0, key=f"test_max_{gid_t}")
-            pitmax_test = c6.number_input("Massimo in pit (s)", 0.0, 900.0, float(test_att.get("pit_max_s", 180.0)), 5.0, key=f"test_pitmax_{gid_t}")
-            st.caption("Campo simulato: ogni bot ha un passo tra il giro migliore e il peggiore, con errori e soste.")
-            g2, g3, g4 = st.columns(3)
-            veloce_test = g2.number_input("Giro migliore dei bot (s)", 20.0, 300.0, float(test_att.get("giro_veloce_s", 55.0)), 0.5, key=f"test_veloce_{gid_t}")
-            lento_test = g3.number_input("Giro peggiore dei bot (s)", 20.0, 300.0, float(test_att.get("giro_lento_s", 68.0)), 0.5, key=f"test_lento_{gid_t}")
-            nostro_test = g4.number_input("Passo del nostro kart (s)", 20.0, 300.0, float(test_att.get("giro_nostro_s", 60.0)), 0.5, key=f"test_nostro_{gid_t}")
-            salva_test = st.form_submit_button("Salva parametri di test", type="primary")
-        if salva_test:
-            gare.salva_parametri_test(
-                gid_t, piloti_att, ore_test, pit_test, min_test, max_test, pitmax_test,
-                giro_veloce_s=float(veloce_test), giro_lento_s=float(lento_test),
-                giro_nostro_s=float(nostro_test),
-            )
-            st.success("Parametri salvati: il campo e il muretto usano i nuovi valori.")
-
-    st.divider()
-    st.subheader("Notifiche")
-    st.caption(
-        "Scegli cosa ti avvisa durante la gara. Vale per questa sessione: "
-        "ricaricando la pagina tornano tutte attive."
-    )
-    for chiave, etichetta, _tipo in NOTIFICHE_CONFIG:
-        st.toggle(etichetta, value=True, key=chiave)
-
-with notebook_tab:
-    st.subheader("Taccuino tecnico")
-    notebook_target = selected_pilot or "Generale"
-    st.caption(
-        f"Spazio di lavoro per {notebook_target}. Note e schizzi si salvano "
-        "nel browser in uso, separati per pilota e Live Timing."
-    )
-    render_notebook(notebook_target, timing_url)
-
-
-render_classifica_sotto()
+       
