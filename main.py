@@ -1441,10 +1441,56 @@ def _stint_restante(max_stint: int) -> float | None:
     return max_stint * 60 - (time.time() - inizio)
 
 
+def stint_residuo_ora(max_stint: int) -> tuple[float | None, bool]:
+    """Secondi al cambio e se siamo ai box, con lo stesso calcolo del pannello centrale.
+
+    Con il piano della gara usa stint e pit programmati (con penalità e pit già fatti).
+    Senza piano usa il timer semplice dello stint.
+    """
+    gara = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA))
+    plan = (gara or {}).get("piano") if (gara or {}).get("tipo") == "Endurance" else None
+    if plan and "stint_min" in plan:
+        durata = float(plan.get("ore") or gara.get("ore") or 0) * 3600
+        if durata > 0:
+            apex_el = None
+            snap = st.session_state.get("apex_snapshot") or {}
+            if st.session_state.get("timing_provider") == "apex" and snap.get("remaining_seconds") is not None:
+                ancora = snap.get("remaining_received_at", snap.get("received_at", time.time()))
+                rimanenti = max(0.0, snap["remaining_seconds"] - (time.time() - ancora))
+                apex_el = durata - rimanenti
+            elapsed = piano.tempo_gara(gara, apex_el)
+            per_pit, pendenti = piano.extra_penalita(gara)
+            stints = piano.simula(
+                durata,
+                float(plan["stint_min"]) * 60,
+                float(plan["pit_sec"]),
+                plan.get("piloti", []),
+                [float(t) for t in gara.get("pit_eseguiti", [])],
+                per_pit,
+                pendenti,
+                elapsed,
+                plan.get("durate_stint"),
+                plan.get("piloti_stint"),
+            )
+            attuale = next((s for s in stints if s["inizio"] <= elapsed < s["fine"]), None)
+            if attuale:
+                return attuale["fine"] - elapsed, False
+            if any(s["inizio"] > elapsed for s in stints):
+                return None, True  # ai box: il prossimo stint non è ancora partito
+    return _stint_restante(max_stint), False
+
+
 @st.fragment(run_every=1)
 def render_sidebar_stint(max_stint: int, alert_minutes: int) -> None:
-    """Conto alla rovescia dello stint, verde → arancio → rosso man mano che si avvicina il cambio."""
-    rimasti = _stint_restante(max_stint)
+    """Conto alla rovescia dello stint, allineato al pannello centrale."""
+    rimasti, in_sosta = stint_residuo_ora(max_stint)
+    if in_sosta:
+        st.markdown(
+            '<div class="pw-card"><div class="k">Stato</div>'
+            '<div class="v" style="color:#f59e0b">Ai box · cambio pilota in corso</div></div>',
+            unsafe_allow_html=True,
+        )
+        return
     if rimasti is None:
         st.markdown(
             '<div class="pw-card"><div class="k">Cambio stint</div>'
