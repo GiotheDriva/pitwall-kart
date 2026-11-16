@@ -2417,9 +2417,7 @@ def estrai_rettifiche_da_commenti(comments: list[dict], pits: dict[str, int] | N
 
 def penalita_pendente(r: dict, pits: dict[str, int], gara: dict | None) -> bool:
     """Penalità e recuperi restano in tabella finché il kart non entra ai box: lì vengono scontati/applicati.
-    In gara TEST sono subito scontati, quindi non compaiono mai in tabella."""
-    if (gara or {}).get("test"):
-        return False
+    Vale allo stesso modo in gara reale e in TEST."""
     base = r.get("pit_base")
     ora = pits.get(str(r["kart"]))
     if base is None or ora is None:
@@ -2483,9 +2481,7 @@ def render_rettifiche(gara: dict | None, pits: dict[str, int] | None = None) -> 
         for r in reversed(voci):
             segno = "+" if r["tipo"] == "penalita" else "-"
             fonte = "🤖 automatica" if r.get("auto") else "✏️ manuale"
-            if (gara or {}).get("test"):
-                fonte += " · applicata subito (TEST)"
-            elif penalita_pendente(r, pits or {}, gara):
+            if penalita_pendente(r, pits or {}, gara):
                 fonte += " · ⏳ da scontare al prossimo pit" if r["tipo"] == "penalita" else " · ⏳ da applicare al prossimo pit"
             else:
                 fonte += " · ✅ scontata al pit" if r["tipo"] == "penalita" else " · ✅ applicato al pit"
