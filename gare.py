@@ -818,7 +818,7 @@ def elimina_penalita(gara_id: str, pen_id: str) -> None:
     _aggiorna(gara_id, fn)
 
 
-def aggiungi_rettifica(gara_id: str, kart: str, tipo: str, valore: float, motivo: str) -> None:
+def aggiungi_rettifica(gara_id: str, kart: str, tipo: str, valore: float, motivo: str, pit_base: int | None = None) -> None:
     """Penalità (+secondi) o recupero (-secondi) assegnato a un kart nella classifica."""
     def fn(g):
         g.setdefault("rettifiche", []).append(
@@ -829,14 +829,19 @@ def aggiungi_rettifica(gara_id: str, kart: str, tipo: str, valore: float, motivo
                 "valore": float(valore),
                 "motivo": motivo.strip(),
                 "ora": datetime.now().isoformat(timespec="seconds"),
+                "pit_base": pit_base,  # pit del kart al momento della penalità: si sconta al pit successivo
             }
         )
     _aggiorna(gara_id, fn)
 
 
-def salva_note_pilota(gara_id: str, testo: str) -> None:
-    """Nota di gara per il pilota, mostrata nel menu laterale."""
-    _aggiorna(gara_id, lambda g: g.__setitem__("note_pilota", testo.strip()))
+def allinea_pit_base(gara_id: str, pits: dict[str, int]) -> None:
+    """Penalità salvate prima del conteggio pit: si agganciano al pit attuale del kart."""
+    def fn(g):
+        for r in g.get("rettifiche", []):
+            if r.get("tipo") == "penalita" and "pit_base" not in r:
+                r["pit_base"] = pits.get(str(r["kart"]))
+    _aggiorna(gara_id, fn)
 
 
 def aggiungi_rettifiche_auto(gara_id: str, nuove: list[dict]) -> int:

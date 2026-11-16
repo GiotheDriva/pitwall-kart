@@ -2373,7 +2373,7 @@ def _csv_riepilogo(rows: list[dict], penalita: dict, recuperi: dict) -> bytes:
     return buf.getvalue().encode("utf-8-sig")
 
 
-def estrai_rettifiche_da_commenti(comments: list[dict]) -> list[dict]:
+def estrai_rettifiche_da_commenti(comments: list[dict], pits: dict[str, int] | None = None) -> list[dict]:
     """Penalità e recuperi letti dai commenti Apex (o dal TEST), con un id stabile per non ripeterli.
 
     "13 Avviso - Penalità 10" → penalità di 10 s al kart 13.
@@ -2410,17 +2410,37 @@ def estrai_rettifiche_da_commenti(comments: list[dict]) -> list[dict]:
             "id": rid, "kart": kart, "tipo": tipo, "valore": valore,
             "motivo": testo[kart_m.end():].strip(" -·")[:140] or testo[:140],
             "ora": c.get("time") or "", "auto": True,
+            "pit_base": (pits or {}).get(kart) if tipo == "penalita" else None,
         })
     return trovate
 
 
-def rettifiche_da_gara(gara: dict | None) -> tuple[dict[str, float], dict[str, float]]:
-    """Penalità e recuperi della gara, sommati per kart."""
+def penalita_pendente(r: dict, pits: dict[str, int], gara: dict | None) -> bool:
+    """Una penalità resta in tabella finché il kart non entra ai box: lì viene scontata.
+    In gara TEST viene scontata subito, quindi non compare mai in tabella."""
+    if r.get("tipo") != "penalita":
+        return False
+    if (gara or {}).get("test"):
+        return False
+    base = r.get("pit_base")
+    ora = pits.get(str(r["kart"]))
+    if base is None or ora is None:
+        return True
+    return ora <= base
+
+
+def rettifiche_da_gara(gara: dict | None, pits: dict[str, int] | None = None) -> tuple[dict[str, float], dict[str, float]]:
+    """Penalità ancora da scontare e recuperi della gara, sommati per kart."""
+    pits = pits or {}
     pen: dict[str, float] = {}
     rec: dict[str, float] = {}
     for r in (gara or {}).get("rettifiche", []):
-        dest = pen if r.get("tipo") == "penalita" else rec
-        dest[str(r["kart"])] = dest.get(str(r["kart"]), 0.0) + float(r["valore"])
+        if r.get("tipo") == "penalita":
+            if not penalita_pendente(r, pits, gara):
+                continue
+            pen[str(r["kart"])] = pen.get(str(r["kart"]), 0.0) + float(r["valore"])
+        else:
+            rec[str(r["kart"])] = rec.get(str(r["kart"]), 0.0) + float(r["valore"])
     return pen, rec
 
 
@@ -2436,13 +2456,15 @@ def _aggiungi_rettifica_manuale(gid: str) -> None:
     elif not motivo:
         esito = (False, "Scrivi il motivo: serve per ricordare perché.")
     else:
-        gare.aggiungi_rettifica(gid, kart, tipo, secondi, motivo)
+        righe = (st.session_state.get("apex_snapshot") or {}).get("rows", [])
+        pits_ora = {str(r["kart"]): r.get("pits") for r in righe if r.get("pits") is not None}
+        gare.aggiungi_rettifica(gid, kart, tipo, secondi, motivo, pit_base=pits_ora.get(kart, 0))
         st.session_state[f"rett_motivo_{gid}"] = ""
         esito = (True, f"{'Penalità' if tipo == 'penalita' else 'Recupero'} aggiunto al kart {kart}.")
     st.session_state[f"_rett_esito_{gid}"] = esito
 
 
-def render_rettifiche(gara: dict | None) -> None:
+def render_rettifiche(gara: dict | None, pits: dict[str, int] | None = None) -> None:
     """Form per penalità e recuperi manuali, con l'elenco di tutte le voci della gara."""
     if not gara:
         return
@@ -2465,6 +2487,13 @@ def render_rettifiche(gara: dict | None) -> None:
         for r in reversed(voci):
             segno = "+" if r["tipo"] == "penalita" else "-"
             fonte = "🤖 automatica" if r.get("auto") else "✏️ manuale"
+            if r["tipo"] == "penalita":
+                if (gara or {}).get("test"):
+                    fonte += " · scontata subito (TEST)"
+                elif penalita_pendente(r, pits or {}, gara):
+                    fonte += " · ⏳ da scontare al prossimo pit"
+                else:
+                    fonte += " · ✅ scontata al pit"
             a, b = st.columns([7, 1])
             a.markdown(
                 f"**Kart {r['kart']}** · {segno}{r['valore']:g} s · {r['motivo']}  \n"
@@ -2487,20 +2516,26 @@ def render_classifica_sotto() -> None:
             pass  # si tiene l'ultima classifica ricevuta
     snapshot = st.session_state.get("apex_snapshot")
     gara_vista = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA))
+    pits = {str(r["kart"]): r.get("pits") for r in (snapshot or {}).get("rows", []) if r.get("pits") is not None}
+    if gara_vista and pits and any(
+        r.get("tipo") == "penalita" and "pit_base" not in r for r in gara_vista.get("rettifiche", [])
+    ):
+        gare.allinea_pit_base(gara_vista["id"], pits)
+        gara_vista = gare.trova(gare.load_gare(), gara_vista["id"])
     if gara_vista and snapshot and snapshot.get("comments"):
         # Penalità e recuperi dal live vengono salvati nella gara una sola volta.
         nuove = gare.aggiungi_rettifiche_auto(
-            gara_vista["id"], estrai_rettifiche_da_commenti(snapshot["comments"])
+            gara_vista["id"], estrai_rettifiche_da_commenti(snapshot["comments"], pits)
         )
         if nuove:
             gara_vista = gare.trova(gare.load_gare(), gara_vista["id"])
     if not snapshot or not snapshot.get("rows"):
-        render_rettifiche(gara_vista)
+        render_rettifiche(gara_vista, pits)
         return
     st.divider()
     st.subheader("Classifica live")
     field_state = pro_tools.track_field(snapshot["rows"], add_event)
-    penalita, recuperi = rettifiche_da_gara(gara_vista)
+    penalita, recuperi = rettifiche_da_gara(gara_vista, pits)
     st.markdown(
         pro_tools.standings_html(
             snapshot["rows"],
@@ -2511,7 +2546,7 @@ def render_classifica_sotto() -> None:
         ),
         unsafe_allow_html=True,
     )
-    render_rettifiche(gara_vista)
+    render_rettifiche(gara_vista, pits)
     st.download_button(
         "📄 Scarica riepilogo CSV",
         data=_csv_riepilogo(snapshot["rows"], penalita, recuperi),
