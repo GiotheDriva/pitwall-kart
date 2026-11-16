@@ -2453,8 +2453,8 @@ def _aggiungi_rettifica_manuale(gid: str) -> None:
         esito = (False, "Scrivi il motivo: serve per ricordare perché.")
     else:
         righe = (st.session_state.get("apex_snapshot") or {}).get("rows", [])
-        pits_ora = {str(r["kart"]): r.get("pits") for r in righe if r.get("pits") is not None}
-        gare.aggiungi_rettifica(gid, kart, tipo, secondi, motivo, pit_base=pits_ora.get(kart))
+        pits_ora = {str(r["kart"]): int(r.get("pits") or 0) for r in righe}
+        gare.aggiungi_rettifica(gid, kart, tipo, secondi, motivo, pit_base=pits_ora.get(kart, 0))
         st.session_state[f"rett_motivo_{gid}"] = ""
         esito = (True, f"{'Penalità' if tipo == 'penalita' else 'Recupero'} aggiunto al kart {kart}.")
     st.session_state[f"_rett_esito_{gid}"] = esito
@@ -2511,7 +2511,8 @@ def render_classifica_sotto() -> None:
             pass  # si tiene l'ultima classifica ricevuta
     snapshot = st.session_state.get("apex_snapshot")
     gara_vista = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA))
-    pits = {str(r["kart"]): r.get("pits") for r in (snapshot or {}).get("rows", []) if r.get("pits") is not None}
+    # Cella dei pit vuota = nessun pit ancora: vale 0, altrimenti la penalità non si scontava mai.
+    pits = {str(r["kart"]): int(r.get("pits") or 0) for r in (snapshot or {}).get("rows", [])}
     if gara_vista and pits and any(
         "pit_base" not in r for r in gara_vista.get("rettifiche", [])
     ):
