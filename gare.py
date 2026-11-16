@@ -454,15 +454,6 @@ def render_home() -> None:
     if bottone.button("＋ Nuova gara", type="primary", key="btn_nuova_gara"):
         dialog_nuova_gara()
 
-    sponsor_lista = load_sponsor()
-    versato = sum(float(s.get("quota_versata") or 0) for s in sponsor_lista)
-    bilancio = sum(residuo_sponsor(s, gare) for s in sponsor_lista)
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Sponsor", len(sponsor_lista))
-    m2.metric("Totale versato dagli sponsor", euro(versato))
-    m3.metric("Bilancio disponibile", euro(bilancio))
-    m4.metric("Gare coperte dagli sponsor", sum(1 for g in gare if float(g.get("quota_sponsor") or 0) > 0))
-
     tab_gare, tab_fatture, tab_sponsor = st.tabs(["🗓️ Gare", "🧾 Fatture", "🤝 Sponsor"])
 
     with tab_gare:
@@ -504,7 +495,20 @@ def _noi(gara: dict) -> float:
     return max(0.0, float(gara.get("quota") or 0) - float(gara.get("quota_sponsor") or 0))
 
 
+def render_metriche_sponsor(gare_lista: list[dict]) -> None:
+    """Totali degli sponsor: mostrati solo dentro le tab Fatture e Sponsor."""
+    sponsor_lista = load_sponsor()
+    versato = sum(float(s.get("quota_versata") or 0) for s in sponsor_lista)
+    bilancio = sum(residuo_sponsor(s, gare_lista) for s in sponsor_lista)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Sponsor", len(sponsor_lista))
+    m2.metric("Totale versato dagli sponsor", euro(versato))
+    m3.metric("Bilancio disponibile", euro(bilancio))
+    m4.metric("Gare coperte dagli sponsor", sum(1 for g in gare_lista if float(g.get("quota_sponsor") or 0) > 0))
+
+
 def render_fatture(gare_lista: list[dict]) -> None:
+    render_metriche_sponsor(gare_lista)
     if not gare_lista:
         st.info("Le fatture compariranno quando aggiungi una gara.")
         return
@@ -639,6 +643,7 @@ def render_fatture(gare_lista: list[dict]) -> None:
 
 def render_sponsor(gare_lista: list[dict]) -> None:
     """Sponsor: nome, quota versata, durata del contratto, gare previste e altro."""
+    render_metriche_sponsor(gare_lista)
     sponsor_lista = load_sponsor()
 
     with st.expander("➕ Aggiungi sponsor", expanded=not sponsor_lista):
