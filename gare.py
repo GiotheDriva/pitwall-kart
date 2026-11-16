@@ -836,10 +836,10 @@ def aggiungi_rettifica(gara_id: str, kart: str, tipo: str, valore: float, motivo
 
 
 def allinea_pit_base(gara_id: str, pits: dict[str, int]) -> None:
-    """Penalità salvate prima del conteggio pit: si agganciano al pit attuale del kart."""
+    """Penalità e recuperi salvati prima del conteggio pit: si agganciano al pit attuale del kart."""
     def fn(g):
         for r in g.get("rettifiche", []):
-            if r.get("tipo") == "penalita" and "pit_base" not in r:
+            if "pit_base" not in r:
                 r["pit_base"] = pits.get(str(r["kart"]))
     _aggiorna(gara_id, fn)
 
