@@ -2193,6 +2193,62 @@ def render_analysis(provider: str | None, history_limit: int) -> None:
         st.info("Cerca un Live Timing per iniziare una sessione di analisi.")
 
 
+def penalita_da_commenti(comments: list[dict]) -> dict[str, float]:
+    """Penalità di ogni kart dai commenti Apex: "13 Avviso - Penalità 10" → kart 13, +10 s."""
+    totali: dict[str, float] = {}
+    for c in comments or []:
+        testo = str(c.get("text") or "")
+        basso = testo.lower()
+        kart = re.match(r"\s*(\d{1,3})\b", testo)
+        if not kart or "recup" in basso:
+            continue
+        pen = re.search(r"penal\w*\D{0,12}?(\d+(?:[.,]\d+)?)", basso)
+        if pen:
+            secondi = float(pen.group(1).replace(",", "."))
+            totali[kart.group(1)] = totali.get(kart.group(1), 0.0) + secondi
+    return totali
+
+
+def rettifiche_da_gara(gara: dict | None) -> tuple[dict[str, float], dict[str, float]]:
+    """Penalità e recuperi inseriti a mano nella gara, sommati per kart."""
+    pen: dict[str, float] = {}
+    rec: dict[str, float] = {}
+    for r in (gara or {}).get("rettifiche", []):
+        dest = pen if r.get("tipo") == "penalita" else rec
+        dest[str(r["kart"])] = dest.get(str(r["kart"]), 0.0) + float(r["valore"])
+    return pen, rec
+
+
+def render_rettifiche(rows: list[dict], gara: dict | None) -> None:
+    """Form per aggiungere penalità o recuperi manuali, con elenco e cancellazione."""
+    if not gara:
+        return
+    with st.expander("➕ Penalità o recupero manuale", expanded=False):
+        opzioni = {f"Kart {r['kart']} · {r['team']}": str(r["kart"]) for r in rows}
+        with st.form(f"rett_{gara['id']}", clear_on_submit=True):
+            c1, c2 = st.columns([2, 1])
+            scelta = c1.selectbox("Kart", options=list(opzioni.keys()) or ["—"])
+            tipo = c2.radio("Tipo", ["Penalità", "Recupero"], horizontal=True)
+            c3, c4 = st.columns([1, 2])
+            secondi = c3.number_input("Secondi", min_value=0.0, max_value=600.0, value=10.0, step=0.5)
+            motivo = c4.text_input("Motivo", placeholder="Es. uscita di pista, errore in pit")
+            if st.form_submit_button("Salva") and opzioni:
+                if not motivo.strip():
+                    st.warning("Scrivi il motivo.")
+                else:
+                    gare.aggiungi_rettifica(
+                        gara["id"], opzioni[scelta],
+                        "penalita" if tipo == "Penalità" else "recupero",
+                        secondi, motivo,
+                    )
+        for r in reversed(gara.get("rettifiche", [])):
+            segno = "+" if r["tipo"] == "penalita" else "-"
+            a, b = st.columns([6, 1])
+            a.markdown(f"**Kart {r['kart']}** · {segno}{r['valore']:g} s · {r['motivo']}")
+            b.button("🗑️", key=f"del_rett_{r['id']}", on_click=gare.elimina_rettifica,
+                     args=(gara["id"], r["id"]))
+
+
 @st.fragment(run_every=5)
 def render_classifica_sotto() -> None:
     """Classifica live sotto le tab: resta aggiornata in qualunque sezione."""
@@ -2209,14 +2265,23 @@ def render_classifica_sotto() -> None:
     st.divider()
     st.subheader("Classifica live")
     field_state = pro_tools.track_field(snapshot["rows"], add_event)
+    gara_vista = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA))
+    pen_auto = penalita_da_commenti(snapshot.get("comments", []))
+    pen_man, recuperi = rettifiche_da_gara(gara_vista)
+    penalita = dict(pen_auto)
+    for kart, secondi in pen_man.items():
+        penalita[kart] = penalita.get(kart, 0.0) + secondi
     st.markdown(
         pro_tools.standings_html(
             snapshot["rows"],
             field_state,
             mio_kart=str((st.session_state.get("_apex_mine") or {}).get("kart") or ""),
+            penalita=penalita,
+            recuperi=recuperi,
         ),
         unsafe_allow_html=True,
     )
+    render_rettifiche(snapshot["rows"], gara_vista)
     with st.expander("Diagnostica feed Apex", expanded=False):
         st.caption(
             "Celle ricevute per la prima riga: tipo colonna → testo. "
@@ -2293,9 +2358,10 @@ def _toast_html(items: list[dict]) -> str:
     if (!root) {{
       root = doc.createElement('div');
       root.id = 'pw-toast-root';
-      root.style.cssText = 'position:fixed;top:64px;right:16px;z-index:999999;display:flex;flex-direction:column;gap:8px;pointer-events:none;';
+      root.style.cssText = 'position:fixed;top:64px;right:16px;z-index:999999;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:360px;';
       doc.body.appendChild(root);
     }}
+    const MAX_VISIBILI = 4;
     win.__pwSeen = win.__pwSeen || {{}};
     const colori = {{ penalita: '#ff4b4b', team: '#ffa500', pos: '#21c55d', pit: '#3b82f6', best: '#a855f7' }};
     for (const it of items) {{
@@ -2305,8 +2371,10 @@ def _toast_html(items: list[dict]) -> str:
       d.className = 'pw-toast';
       d.textContent = it.text;
       d.style.borderLeftColor = colori[it.kind] || '#f5b400';
-      root.appendChild(d);
-      win.setTimeout(() => d.remove(), 6000);
+      // Le più nuove stanno in alto; oltre il limite esce la più vecchia, così nulla scende fuori schermo.
+      root.insertBefore(d, root.firstChild);
+      while (root.children.length > MAX_VISIBILI) root.removeChild(root.lastChild);
+      win.setTimeout(() => {{ if (d.parentNode) d.parentNode.removeChild(d); }}, 6000);
     }}
   }} catch (e) {{ console.log('notifiche', e); }}
 }})();
@@ -2325,15 +2393,29 @@ def render_toasts() -> None:
     components.html(_toast_html(payload), height=0)
 
 
+def _rimuovi_notifica(nid: int) -> None:
+    st.session_state["notifiche"] = [n for n in st.session_state.get("notifiche", []) if n["id"] != nid]
+
+
+def _svuota_notifiche() -> None:
+    st.session_state["notifiche"] = []
+
+
 @st.fragment(run_every=5)
 def render_campana() -> None:
     items = st.session_state.get("notifiche", [])
     with st.popover(f"🔔 {len(items)}"):
-        st.markdown("**Notifiche · nostro kart e team**")
+        testa, svuota = st.columns([3, 2])
+        testa.markdown("**Notifiche · nostro kart e team**")
+        svuota.button("Svuota tutte", key="svuota_notifiche", disabled=not items,
+                      on_click=_svuota_notifiche, use_container_width=True)
         if not items:
             st.caption("Nessuna notifica ancora.")
         for n in items[:60]:
-            st.markdown(f"`{n['time']}` · {n['text']}")
+            testo, cestino = st.columns([8, 1])
+            testo.markdown(f"`{n['time']}` · {n['text']}")
+            cestino.button("✕", key=f"del_notif_{n['id']}", help="Rimuovi",
+                           on_click=_rimuovi_notifica, args=(n["id"],))
 
 
 titolo_col, campana_col = st.columns([6, 1])

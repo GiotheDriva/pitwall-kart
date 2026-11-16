@@ -821,6 +821,15 @@ def track_field(rows: list[dict], add_event) -> dict:
 PRO_TABLE_CSS = """
 <style>
 .pw-table-wrap { overflow-x: auto; border: 1px solid rgba(128,128,128,0.28); border-radius: 0.7rem; }
+.pw-rett { font-family: ui-monospace, "JetBrains Mono", Consolas, monospace; font-weight: 700; text-align: center; }
+.pw-rett-pen { color: #ff6b6b; }
+.pw-rett-rec { color: #70e0a4; }
+.pw-rett-zero { color: #6b7685; }
+.pw-table { font-family: "Inter", "Segoe UI", system-ui, sans-serif; }
+.pw-table tbody tr { animation: pwRowIn 0.45s ease-out both; }
+.pw-table tr.pw-leader td { background: linear-gradient(90deg, rgba(250,204,21,0.12), transparent 70%); }
+.pw-table tr.pw-leader td.pw-pos strong { color: #facc15; text-shadow: 0 0 10px rgba(250,204,21,0.55); }
+@keyframes pwRowIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 .pw-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; color: #e8edf5; }
 .pw-table th { text-align: left; padding: 0.55rem 0.7rem; font-size: 0.7rem; letter-spacing: 0.08em;
   text-transform: uppercase; color: #9aa4b2; background: rgba(128,128,128,0.10); }
@@ -840,7 +849,19 @@ PRO_TABLE_CSS = """
 """
 
 
-def standings_html(rows: list[dict], state: dict, mio_kart: str = "") -> str:
+def _cella_rettifica(secondi: float | None, tipo: str) -> str:
+    """Cella penalità (+tot, rossa) o recupero (-tot, verde). Vuota se non c'è nulla."""
+    if not secondi:
+        return '<td class="pw-rett pw-rett-zero">—</td>'
+    if tipo == "pen":
+        return f'<td class="pw-rett pw-rett-pen">+{secondi:g}s</td>'
+    return f'<td class="pw-rett pw-rett-rec">-{secondi:g}s</td>'
+
+
+def standings_html(rows: list[dict], state: dict, mio_kart: str = "",
+                   penalita: dict | None = None, recuperi: dict | None = None) -> str:
+    penalita = penalita or {}
+    recuperi = recuperi or {}
     flashes: dict[str, set[str]] = state.get("flashes", {})
     trends: dict[str, str] = state.get("trends", {})
     session_best = state.get("session_best")
@@ -877,11 +898,14 @@ def standings_html(rows: list[dict], state: dict, mio_kart: str = "") -> str:
             f'<td>{_html.escape(str(row["laps_completed"] if row["laps_completed"] is not None else "—"))}</td>'
             f'<td>{_html.escape(str(row["pits"] if row["pits"] is not None else "—"))}</td>'
             f'<td>{_html.escape(row["on_track"] or "—")}</td>'
+            f'{_cella_rettifica(penalita.get(kart), "pen")}'
+            f'{_cella_rettifica(recuperi.get(kart), "rec")}'
             "</tr>"
         )
     head = (
         "<tr><th>Pos</th><th>Kart</th><th>Pilota / team</th><th>Ultimo giro</th>"
-        "<th>Distacco</th><th>Miglior giro</th><th>Giri</th><th>Pit</th><th>In pista</th></tr>"
+        "<th>Distacco</th><th>Miglior giro</th><th>Giri</th><th>Pit</th><th>In pista</th>"
+        "<th>Penalità</th><th>Recupero</th></tr>"
     )
     return (
         PRO_TABLE_CSS

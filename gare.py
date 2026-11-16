@@ -818,6 +818,28 @@ def elimina_penalita(gara_id: str, pen_id: str) -> None:
     _aggiorna(gara_id, fn)
 
 
+def aggiungi_rettifica(gara_id: str, kart: str, tipo: str, valore: float, motivo: str) -> None:
+    """Penalità (+secondi) o recupero (-secondi) assegnato a un kart nella classifica."""
+    def fn(g):
+        g.setdefault("rettifiche", []).append(
+            {
+                "id": uuid.uuid4().hex[:8],
+                "kart": str(kart),
+                "tipo": tipo,  # "penalita" oppure "recupero"
+                "valore": float(valore),
+                "motivo": motivo.strip(),
+                "ora": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+    _aggiorna(gara_id, fn)
+
+
+def elimina_rettifica(gara_id: str, rett_id: str) -> None:
+    def fn(g):
+        g["rettifiche"] = [r for r in g.get("rettifiche", []) if r.get("id") != rett_id]
+    _aggiorna(gara_id, fn)
+
+
 def segna_scontata(gara_id: str, pen_id: str, scontata: bool) -> None:
     """Segna a mano una penalità come scontata (o la riapre). Senza pit registrati vale 0: nessun tempo extra."""
     def fn(g):
