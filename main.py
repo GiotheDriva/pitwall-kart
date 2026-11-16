@@ -2509,8 +2509,11 @@ def render_classifica_sotto() -> None:
             )
         except Exception:
             pass  # si tiene l'ultima classifica ricevuta
-    snapshot = st.session_state.get("apex_snapshot")
     gara_vista = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA))
+    if gara_vista and gara_vista.get("test"):
+        # In TEST la classifica si ricalcola ogni volta dalla gara: stesso orario e stessi pit del pannello.
+        st.session_state["apex_snapshot"] = snapshot_test(gara_vista)
+    snapshot = st.session_state.get("apex_snapshot")
     # Cella dei pit vuota = nessun pit ancora: vale 0, altrimenti la penalità non si scontava mai.
     pits = {str(r["kart"]): int(r.get("pits") or 0) for r in (snapshot or {}).get("rows", [])}
     if gara_vista and pits and any(
