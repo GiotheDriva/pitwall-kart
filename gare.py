@@ -57,24 +57,32 @@ def _leggi_locale() -> list[dict]:
     return data if isinstance(data, list) else []
 
 
-def load_gare() -> list[dict]:
+SPONSOR_ID = "__sponsor__"  # record speciale: l'elenco sponsor, salvato accanto alle gare
+
+
+def _tutti_i_record() -> list[dict]:
     if _client() is None:
         return _leggi_locale()
-    gare = _leggi_remoto()
+    gare_remote = _leggi_remoto()
     locale = DATA_FILE.exists() and _leggi_locale()
-    if not gare and locale:
+    if not gare_remote and locale:
         # Primo avvio con Supabase: importa le gare locali una sola volta.
         save_gare(locale)
         DATA_FILE.rename(DATA_FILE.with_suffix(".importato.json"))
         return locale
-    return gare
+    return gare_remote
+
+
+def load_gare() -> list[dict]:
+    return [g for g in _tutti_i_record() if not str(g.get("id", "")).startswith("__")]
 
 
 def save_gare(gare: list[dict]) -> None:
     client = _client()
     if client is None:
+        speciali = [r for r in _leggi_locale() if str(r.get("id", "")).startswith("__")]
         tmp = DATA_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(gare, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(json.dumps(gare + speciali, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, DATA_FILE)
         return
     if gare:
@@ -82,9 +90,40 @@ def save_gare(gare: list[dict]) -> None:
     ids = {g["id"] for g in gare}
     esistenti = client.table("gare").select("id").execute().data or []
     for row in esistenti:
-        if row["id"] not in ids:
+        if row["id"] not in ids and not str(row["id"]).startswith("__"):
             client.table("gare").delete().eq("id", row["id"]).execute()
     _leggi_remoto.clear()
+
+
+def load_sponsor() -> list[dict]:
+    for r in _tutti_i_record():
+        if r.get("id") == SPONSOR_ID:
+            return list(r.get("sponsor") or [])
+    return []
+
+
+def save_sponsor(sponsor: list[dict]) -> None:
+    record = {"id": SPONSOR_ID, "sponsor": sponsor}
+    client = _client()
+    if client is None:
+        altri = [r for r in _leggi_locale() if r.get("id") != SPONSOR_ID]
+        tmp = DATA_FILE.with_suffix(".tmp")
+        gare_locali = [r for r in altri if not str(r.get("id", "")).startswith("__")]
+        tmp.write_text(json.dumps(gare_locali + [record], ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, DATA_FILE)
+        return
+    client.table("gare").upsert([{"id": SPONSOR_ID, "dati": record}]).execute()
+    _leggi_remoto.clear()
+
+
+def residuo_sponsor(sponsor: dict, gare_lista: list[dict], escludi_gara: str | None = None) -> float:
+    """Bilancio dello sponsor: quota versata meno quanto ha già coperto in altre gare."""
+    usato = sum(
+        float(g.get("quota_sponsor") or 0)
+        for g in gare_lista
+        if g.get("sponsor_id") == sponsor["id"] and g["id"] != escludi_gara
+    )
+    return float(sponsor.get("quota_versata") or 0) - usato
 
 
 def trova(gare: list[dict], gara_id: str) -> dict | None:
@@ -415,7 +454,16 @@ def render_home() -> None:
     if bottone.button("＋ Nuova gara", type="primary", key="btn_nuova_gara"):
         dialog_nuova_gara()
 
-    tab_gare, tab_fatture = st.tabs(["🗓️ Gare", "🧾 Fatture"])
+    sponsor_lista = load_sponsor()
+    versato = sum(float(s.get("quota_versata") or 0) for s in sponsor_lista)
+    bilancio = sum(residuo_sponsor(s, gare) for s in sponsor_lista)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Sponsor", len(sponsor_lista))
+    m2.metric("Totale versato dagli sponsor", euro(versato))
+    m3.metric("Bilancio disponibile", euro(bilancio))
+    m4.metric("Gare coperte dagli sponsor", sum(1 for g in gare if float(g.get("quota_sponsor") or 0) > 0))
+
+    tab_gare, tab_fatture, tab_sponsor = st.tabs(["🗓️ Gare", "🧾 Fatture", "🤝 Sponsor"])
 
     with tab_gare:
         if not gare:
@@ -447,21 +495,57 @@ def render_home() -> None:
     with tab_fatture:
         render_fatture(gare)
 
+    with tab_sponsor:
+        render_sponsor(gare)
 
-def render_fatture(gare: list[dict]) -> None:
-    if not gare:
+
+def _noi(gara: dict) -> float:
+    """Quota a carico del team: costo della gara meno la parte coperta dallo sponsor."""
+    return max(0.0, float(gara.get("quota") or 0) - float(gara.get("quota_sponsor") or 0))
+
+
+def render_fatture(gare_lista: list[dict]) -> None:
+    if not gare_lista:
         st.info("Le fatture compariranno quando aggiungi una gara.")
         return
 
-    totale = sum(float(g.get("quota") or 0) for g in gare)
-    pagato = sum(float(g.get("quota") or 0) for g in gare if g.get("pagata"))
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Gare", len(gare))
-    k2.metric("Totale quote", euro(totale))
-    k3.metric("Pagato", euro(pagato))
-    k4.metric("Da pagare", euro(totale - pagato))
+    for msg in st.session_state.pop("_fatt_avvisi", []):
+        st.warning(msg)
 
-    st.caption("Spunta **Pagata** e indica la data di pagamento: le modifiche si salvano subito.")
+    sponsor_lista = load_sponsor()
+    per_id = {s["id"]: s for s in sponsor_lista}
+    id_per_nome = {s["nome"]: s["id"] for s in sponsor_lista}
+
+    costi = sum(float(g.get("quota") or 0) for g in gare_lista)
+    coperto = sum(float(g.get("quota_sponsor") or 0) for g in gare_lista)
+    noi = sum(_noi(g) for g in gare_lista)
+    pagato = sum(_noi(g) for g in gare_lista if g.get("pagata"))
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Gare", len(gare_lista))
+    k2.metric("Costi totali", euro(costi))
+    k3.metric("Coperto dagli sponsor", euro(coperto))
+    k4.metric("A carico nostro", euro(noi))
+    k5.metric("Da pagare", euro(noi - pagato))
+
+    if sponsor_lista:
+        st.markdown("**Bilancio sponsor**")
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Sponsor": s["nome"],
+                    "Versato (€)": float(s.get("quota_versata") or 0),
+                    "Già coperto (€)": float(s.get("quota_versata") or 0) - residuo_sponsor(s, gare_lista),
+                    "Disponibile (€)": residuo_sponsor(s, gare_lista),
+                }
+                for s in sponsor_lista
+            ]).round(2),
+            hide_index=True,
+        )
+
+    st.caption(
+        "Per ogni gara scegli lo sponsor e quanto copre. Il resto resta a carico nostro. "
+        "Lo sponsor non può coprire più del bilancio disponibile. Spunta **Pagata** quando hai pagato la tua parte."
+    )
     df = pd.DataFrame(
         [
             {
@@ -469,21 +553,27 @@ def render_fatture(gare: list[dict]) -> None:
                 "Gara": g["nome"],
                 "Team": g.get("team", ""),
                 "Data": g.get("data", ""),
-                "Quota (€)": float(g.get("quota") or 0),
+                "Costo (€)": float(g.get("quota") or 0),
+                "Sponsor": per_id[g["sponsor_id"]]["nome"] if g.get("sponsor_id") in per_id else "",
+                "Quota sponsor (€)": float(g.get("quota_sponsor") or 0),
+                "A noi (€)": _noi(g),
                 "Pagata": bool(g.get("pagata")),
                 "Data pagamento": g.get("data_pagamento", ""),
             }
-            for g in gare
+            for g in gare_lista
         ]
     )
     edited = st.data_editor(
         df,
         hide_index=True,
         key="editor_fatture",
-        disabled=["ID", "Gara", "Team", "Data", "Quota (€)"],
+        disabled=["ID", "Gara", "Team", "Data", "Costo (€)", "A noi (€)"],
         column_config={
             "ID": None,
-            "Quota (€)": st.column_config.NumberColumn(format="€ %.2f"),
+            "Costo (€)": st.column_config.NumberColumn(format="€ %.2f"),
+            "Sponsor": st.column_config.SelectboxColumn("Sponsor", options=[""] + list(id_per_nome.keys())),
+            "Quota sponsor (€)": st.column_config.NumberColumn(format="€ %.2f", min_value=0.0),
+            "A noi (€)": st.column_config.NumberColumn(format="€ %.2f"),
             "Pagata": st.column_config.CheckboxColumn("Pagata"),
             "Data pagamento": st.column_config.TextColumn(help="Esempio: 2026-10-28"),
         },
@@ -491,25 +581,51 @@ def render_fatture(gare: list[dict]) -> None:
 
     archivio = load_gare()
     changed = False
+    avvisi = []
     for _, row in edited.iterrows():
         gara = trova(archivio, row["ID"])
         if not gara:
             continue
-        if bool(row["Pagata"]) != bool(gara.get("pagata")) or str(row["Data pagamento"] or "") != gara.get("data_pagamento", ""):
-            gara["pagata"] = bool(row["Pagata"])
-            gara["data_pagamento"] = str(row["Data pagamento"] or "").strip()
+        nome_sp = row["Sponsor"] if isinstance(row["Sponsor"], str) else ""
+        sp_id = id_per_nome.get(nome_sp, "")
+        costo = float(gara.get("quota") or 0)
+        quota_sp = float(row["Quota sponsor (€)"]) if sp_id and row["Quota sponsor (€)"] == row["Quota sponsor (€)"] else 0.0
+        quota_sp = min(max(0.0, quota_sp), costo)
+        if sp_id:
+            disponibile = residuo_sponsor(per_id[sp_id], archivio, escludi_gara=gara["id"])
+            if quota_sp > disponibile:
+                avvisi.append(
+                    f"{gara['nome']}: {nome_sp} ha solo {euro(max(0, disponibile))} disponibili, "
+                    f"quota ridotta a quella cifra."
+                )
+                quota_sp = max(0.0, disponibile)
+        else:
+            quota_sp = 0.0
+        pagata = bool(row["Pagata"])
+        data_pag = str(row["Data pagamento"] or "").strip()
+        if (
+            (gara.get("sponsor_id") or "") != sp_id
+            or float(gara.get("quota_sponsor") or 0) != quota_sp
+            or bool(gara.get("pagata")) != pagata
+            or data_pag != gara.get("data_pagamento", "")
+        ):
+            gara["sponsor_id"] = sp_id
+            gara["quota_sponsor"] = quota_sp
+            gara["pagata"] = pagata
+            gara["data_pagamento"] = data_pag
             changed = True
     if changed:
         save_gare(archivio)
+        st.session_state["_fatt_avvisi"] = avvisi
         st.rerun()
 
     riepilogo: dict[str, dict] = {}
     for _, row in df.iterrows():
         r = riepilogo.setdefault(row["Team"], {"Team": row["Team"], "Gare": 0,
-                                               "Totale (€)": 0.0, "Pagato (€)": 0.0, "Da pagare (€)": 0.0})
+                                               "A noi (€)": 0.0, "Pagato (€)": 0.0, "Da pagare (€)": 0.0})
         r["Gare"] += 1
-        r["Totale (€)"] += row["Quota (€)"]
-        r["Pagato (€)" if row["Pagata"] else "Da pagare (€)"] += row["Quota (€)"]
+        r["A noi (€)"] += row["A noi (€)"]
+        r["Pagato (€)" if row["Pagata"] else "Da pagare (€)"] += row["A noi (€)"]
     per_team = pd.DataFrame(list(riepilogo.values()))
     st.markdown("**Riepilogo per team**")
     st.dataframe(per_team.round(2), hide_index=True)
@@ -519,6 +635,93 @@ def render_fatture(gare: list[dict]) -> None:
         file_name=f"fatture-gare-{date.today().isoformat()}.csv",
         mime="text/csv",
     )
+
+
+def render_sponsor(gare_lista: list[dict]) -> None:
+    """Sponsor: nome, quota versata, durata del contratto, gare previste e altro."""
+    sponsor_lista = load_sponsor()
+
+    with st.expander("➕ Aggiungi sponsor", expanded=not sponsor_lista):
+        with st.form("nuovo_sponsor", clear_on_submit=True):
+            c1, c2 = st.columns([2, 1])
+            nome = c1.text_input("Nome sponsor *")
+            quota = c2.number_input("Quota versata (€)", min_value=0.0, value=0.0, step=50.0)
+            c3, c4 = st.columns([2, 1])
+            durata = c3.text_input("Durata contratto", placeholder="Es. Stagione 2026, 6 mesi")
+            gare_prev = c4.number_input("Gare previste", min_value=0, value=0, step=1)
+            note = st.text_area("Altro (contatti, accordi, note)", height=80)
+            if st.form_submit_button("Aggiungi sponsor", type="primary"):
+                if not nome.strip():
+                    st.warning("Scrivi il nome dello sponsor.")
+                else:
+                    sponsor_lista.append({
+                        "id": uuid.uuid4().hex[:8], "nome": nome.strip(), "quota_versata": float(quota),
+                        "durata": durata.strip(), "gare_previste": int(gare_prev), "note": note.strip(),
+                    })
+                    save_sponsor(sponsor_lista)
+                    st.rerun()
+
+    if not sponsor_lista:
+        st.info("Nessuno sponsor ancora. Aggiungilo con il riquadro qui sopra.")
+        return
+
+    usate = {s["id"]: sum(1 for g in gare_lista if g.get("sponsor_id") == s["id"] and float(g.get("quota_sponsor") or 0) > 0)
+             for s in sponsor_lista}
+    df = pd.DataFrame([
+        {
+            "ID": s["id"],
+            "Nome": s["nome"],
+            "Quota versata (€)": float(s.get("quota_versata") or 0),
+            "Durata contratto": s.get("durata", ""),
+            "Gare previste": int(s.get("gare_previste") or 0),
+            "Gare coperte": usate[s["id"]],
+            "Disponibile (€)": residuo_sponsor(s, gare_lista),
+            "Altro": s.get("note", ""),
+        }
+        for s in sponsor_lista
+    ])
+    st.caption("Modifica direttamente la tabella. Per eliminare uno sponsor usa il cestino a sinistra della riga.")
+    edited = st.data_editor(
+        df,
+        hide_index=True,
+        num_rows="dynamic",
+        key="editor_sponsor",
+        disabled=["ID", "Gare coperte", "Disponibile (€)"],
+        column_config={
+            "ID": None,
+            "Quota versata (€)": st.column_config.NumberColumn(format="€ %.2f", min_value=0.0),
+            "Gare previste": st.column_config.NumberColumn(min_value=0, step=1),
+            "Disponibile (€)": st.column_config.NumberColumn(format="€ %.2f"),
+            "Altro": st.column_config.TextColumn(width="large"),
+        },
+    )
+
+    nuova = []
+    for _, row in edited.iterrows():
+        nome = str(row["Nome"] or "").strip() if isinstance(row["Nome"], str) else ""
+        if not nome:
+            continue
+        sid = row["ID"] if isinstance(row["ID"], str) and row["ID"] else uuid.uuid4().hex[:8]
+        nuova.append({
+            "id": sid, "nome": nome,
+            "quota_versata": float(row["Quota versata (€)"] or 0),
+            "durata": str(row["Durata contratto"] or "").strip(),
+            "gare_previste": int(row["Gare previste"] or 0),
+            "note": str(row["Altro"] or "").strip() if isinstance(row["Altro"], str) else "",
+        })
+
+    campi = lambda s: (s["id"], s["nome"], s["quota_versata"], s["durata"], s["gare_previste"], s["note"])
+    if [campi(s) for s in nuova] != [campi(s) for s in sponsor_lista]:
+        sparite = {s["id"] for s in sponsor_lista} - {s["id"] for s in nuova}
+        if sparite:
+            archivio = load_gare()
+            for g in archivio:
+                if g.get("sponsor_id") in sparite:
+                    g["sponsor_id"] = ""
+                    g["quota_sponsor"] = 0.0
+            save_gare(archivio)
+        save_sponsor(nuova)
+        st.rerun()
 
 
 # --------------------------------------------------------------------------- #
