@@ -839,6 +839,25 @@ def salva_note_pilota(gara_id: str, testo: str) -> None:
     _aggiorna(gara_id, lambda g: g.__setitem__("note_pilota", testo.strip()))
 
 
+def aggiungi_rettifiche_auto(gara_id: str, nuove: list[dict]) -> int:
+    """Salva le penalità lette dal live Apex: ogni penalità una sola volta (id stabile). Restituisce quante ne ha aggiunte."""
+    gare_all = load_gare()
+    gara = trova(gare_all, gara_id)
+    if not gara:
+        return 0
+    lista = gara.setdefault("rettifiche", [])
+    esistenti = {r.get("id") for r in lista}
+    da_salvare = []
+    for r in nuove:
+        if r["id"] not in esistenti:
+            esistenti.add(r["id"])
+            da_salvare.append(r)
+    if da_salvare:
+        lista.extend(da_salvare)
+        save_gare(gare_all)
+    return len(da_salvare)
+
+
 def elimina_rettifica(gara_id: str, rett_id: str) -> None:
     def fn(g):
         g["rettifiche"] = [r for r in g.get("rettifiche", []) if r.get("id") != rett_id]

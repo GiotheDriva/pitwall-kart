@@ -2327,24 +2327,49 @@ def _csv_riepilogo(rows: list[dict], penalita: dict, recuperi: dict) -> bytes:
     return buf.getvalue().encode("utf-8-sig")
 
 
-def penalita_da_commenti(comments: list[dict]) -> dict[str, float]:
-    """Penalità di ogni kart dai commenti Apex: "13 Avviso - Penalità 10" → kart 13, +10 s."""
-    totali: dict[str, float] = {}
+def estrai_rettifiche_da_commenti(comments: list[dict]) -> list[dict]:
+    """Penalità e recuperi letti dai commenti Apex (o dal TEST), con un id stabile per non ripeterli.
+
+    "13 Avviso - Penalità 10" → penalità di 10 s al kart 13.
+    Un commento con "recupero" e un numero → recupero di quei secondi.
+    """
+    trovate: list[dict] = []
+    visti: set[str] = set()
     for c in comments or []:
-        testo = str(c.get("text") or "")
+        testo = str(c.get("text") or "").strip()
         basso = testo.lower()
-        kart = re.match(r"\s*(\d{1,3})\b", testo)
-        if not kart or "recup" in basso:
+        kart_m = re.match(r"\s*(\d{1,3})\b", testo) or re.search(r"kart\s+(\d{1,3})\b", basso)
+        if not kart_m:
             continue
-        pen = re.search(r"penal\w*\D{0,12}?(\d+(?:[.,]\d+)?)", basso)
-        if pen:
-            secondi = float(pen.group(1).replace(",", "."))
-            totali[kart.group(1)] = totali.get(kart.group(1), 0.0) + secondi
-    return totali
+        kart = kart_m.group(1)
+        if "recup" in basso:
+            num = re.search(r"recup\w*\D{0,12}?(\d+(?:[.,]\d+)?)", basso)
+            tipo = "recupero"
+        elif "penal" in basso:
+            num = re.search(r"penal\w*\D{0,12}?(\d+(?:[.,]\d+)?)", basso)
+            tipo = "penalita"
+        else:
+            continue
+        if not num:
+            continue
+        valore = float(num.group(1).replace(",", "."))
+        if valore <= 0:
+            continue
+        chiave = hashlib.sha1(f"{kart}|{c.get('time', '')}|{testo}".encode("utf-8")).hexdigest()[:12]
+        rid = f"auto-{chiave}"
+        if rid in visti:
+            continue
+        visti.add(rid)
+        trovate.append({
+            "id": rid, "kart": kart, "tipo": tipo, "valore": valore,
+            "motivo": testo[kart_m.end():].strip(" -·")[:140] or testo[:140],
+            "ora": c.get("time") or "", "auto": True,
+        })
+    return trovate
 
 
 def rettifiche_da_gara(gara: dict | None) -> tuple[dict[str, float], dict[str, float]]:
-    """Penalità e recuperi inseriti a mano nella gara, sommati per kart."""
+    """Penalità e recuperi della gara, sommati per kart."""
     pen: dict[str, float] = {}
     rec: dict[str, float] = {}
     for r in (gara or {}).get("rettifiche", []):
@@ -2353,34 +2378,55 @@ def rettifiche_da_gara(gara: dict | None) -> tuple[dict[str, float], dict[str, f
     return pen, rec
 
 
-def render_rettifiche(rows: list[dict], gara: dict | None) -> None:
-    """Form per aggiungere penalità o recuperi manuali, con elenco e cancellazione."""
+def _aggiungi_rettifica_manuale(gid: str) -> None:
+    """Callback del form: se qualcosa non va lascia i dati scritti e mostra il motivo."""
+    kart_raw = st.session_state.get(f"rett_kart_{gid}")
+    kart = str(int(kart_raw)) if kart_raw else ""
+    tipo = "penalita" if st.session_state.get(f"rett_tipo_{gid}") == "Penalità" else "recupero"
+    secondi = float(st.session_state.get(f"rett_sec_{gid}") or 0)
+    motivo = (st.session_state.get(f"rett_motivo_{gid}") or "").strip()
+    if not kart or secondi <= 0:
+        esito = (False, "Inserisci un numero di kart e un valore in secondi maggiore di zero.")
+    elif not motivo:
+        esito = (False, "Scrivi il motivo: serve per ricordare perché.")
+    else:
+        gare.aggiungi_rettifica(gid, kart, tipo, secondi, motivo)
+        st.session_state[f"rett_motivo_{gid}"] = ""
+        esito = (True, f"{'Penalità' if tipo == 'penalita' else 'Recupero'} aggiunto al kart {kart}.")
+    st.session_state[f"_rett_esito_{gid}"] = esito
+
+
+def render_rettifiche(gara: dict | None) -> None:
+    """Form per penalità e recuperi manuali, con l'elenco di tutte le voci della gara."""
     if not gara:
         return
-    with st.expander("➕ Penalità o recupero manuale", expanded=False):
-        opzioni = {f"Kart {r['kart']} · {r['team']}": str(r["kart"]) for r in rows}
-        with st.form(f"rett_{gara['id']}", clear_on_submit=True):
-            c1, c2 = st.columns([2, 1])
-            scelta = c1.selectbox("Kart", options=list(opzioni.keys()) or ["—"])
-            tipo = c2.radio("Tipo", ["Penalità", "Recupero"], horizontal=True)
-            c3, c4 = st.columns([1, 2])
-            secondi = c3.number_input("Secondi", min_value=0.0, max_value=600.0, value=10.0, step=0.5)
-            motivo = c4.text_input("Motivo", placeholder="Es. uscita di pista, errore in pit")
-            if st.form_submit_button("Salva") and opzioni:
-                if not motivo.strip():
-                    st.warning("Scrivi il motivo.")
-                else:
-                    gare.aggiungi_rettifica(
-                        gara["id"], opzioni[scelta],
-                        "penalita" if tipo == "Penalità" else "recupero",
-                        secondi, motivo,
-                    )
-        for r in reversed(gara.get("rettifiche", [])):
+    gid = gara["id"]
+    voci = gara.get("rettifiche", [])
+    with st.expander(f"➕ Penalità e recuperi · {len(voci)} voci", expanded=False):
+        esito = st.session_state.pop(f"_rett_esito_{gid}", None)
+        if esito:
+            (st.success if esito[0] else st.warning)(esito[1])
+        c1, c2 = st.columns([1, 2])
+        c1.number_input("Numero kart", min_value=1, max_value=999, value=1, step=1, key=f"rett_kart_{gid}")
+        c2.radio("Tipo", ["Penalità", "Recupero"], horizontal=True, key=f"rett_tipo_{gid}")
+        c3, c4 = st.columns([1, 2])
+        c3.number_input("Secondi", min_value=0.0, max_value=600.0, value=10.0, step=0.5, key=f"rett_sec_{gid}")
+        c4.text_input("Motivo", placeholder="Es. uscita di pista, errore in pit", key=f"rett_motivo_{gid}")
+        st.button("Aggiungi", type="primary", key=f"rett_add_{gid}",
+                  on_click=_aggiungi_rettifica_manuale, args=(gid,))
+        if voci:
+            st.divider()
+        for r in reversed(voci):
             segno = "+" if r["tipo"] == "penalita" else "-"
-            a, b = st.columns([6, 1])
-            a.markdown(f"**Kart {r['kart']}** · {segno}{r['valore']:g} s · {r['motivo']}")
-            b.button("🗑️", key=f"del_rett_{r['id']}", on_click=gare.elimina_rettifica,
-                     args=(gara["id"], r["id"]))
+            fonte = "🤖 automatica" if r.get("auto") else "✏️ manuale"
+            a, b = st.columns([7, 1])
+            a.markdown(
+                f"**Kart {r['kart']}** · {segno}{r['valore']:g} s · {r['motivo']}  \n"
+                f"<small>{fonte}{' · ' + r['ora'] if r.get('ora') else ''}</small>",
+                unsafe_allow_html=True,
+            )
+            b.button("🗑️", key=f"del_rett_{r['id']}", help="Elimina",
+                     on_click=gare.elimina_rettifica, args=(gid, r["id"]))
 
 
 @st.fragment(run_every=5)
@@ -2394,17 +2440,21 @@ def render_classifica_sotto() -> None:
         except Exception:
             pass  # si tiene l'ultima classifica ricevuta
     snapshot = st.session_state.get("apex_snapshot")
-    if not snapshot or not snapshot.get('rows'):
+    gara_vista = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA))
+    if gara_vista and snapshot and snapshot.get("comments"):
+        # Penalità e recuperi dal live vengono salvati nella gara una sola volta.
+        nuove = gare.aggiungi_rettifiche_auto(
+            gara_vista["id"], estrai_rettifiche_da_commenti(snapshot["comments"])
+        )
+        if nuove:
+            gara_vista = gare.trova(gare.load_gare(), gara_vista["id"])
+    if not snapshot or not snapshot.get("rows"):
+        render_rettifiche(gara_vista)
         return
     st.divider()
     st.subheader("Classifica live")
     field_state = pro_tools.track_field(snapshot["rows"], add_event)
-    gara_vista = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA))
-    pen_auto = penalita_da_commenti(snapshot.get("comments", []))
-    pen_man, recuperi = rettifiche_da_gara(gara_vista)
-    penalita = dict(pen_auto)
-    for kart, secondi in pen_man.items():
-        penalita[kart] = penalita.get(kart, 0.0) + secondi
+    penalita, recuperi = rettifiche_da_gara(gara_vista)
     st.markdown(
         pro_tools.standings_html(
             snapshot["rows"],
@@ -2415,7 +2465,7 @@ def render_classifica_sotto() -> None:
         ),
         unsafe_allow_html=True,
     )
-    render_rettifiche(snapshot["rows"], gara_vista)
+    render_rettifiche(gara_vista)
     st.download_button(
         "📄 Scarica riepilogo CSV",
         data=_csv_riepilogo(snapshot["rows"], penalita, recuperi),
