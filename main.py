@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import copy
 import hashlib
 import html
@@ -1433,6 +1434,85 @@ for key, default in {
         st.session_state[key] = default
 
 
+def _stint_restante(max_stint: int) -> float | None:
+    inizio = st.session_state.get("_stint_started_at")
+    if inizio is None:
+        return None
+    return max_stint * 60 - (time.time() - inizio)
+
+
+@st.fragment(run_every=1)
+def render_sidebar_stint(max_stint: int, alert_minutes: int) -> None:
+    """Conto alla rovescia dello stint, verde → arancio → rosso man mano che si avvicina il cambio."""
+    rimasti = _stint_restante(max_stint)
+    if rimasti is None:
+        st.markdown(
+            '<div class="pw-card"><div class="k">Cambio stint</div>'
+            '<div class="v">In attesa del primo stint</div></div>',
+            unsafe_allow_html=True,
+        )
+        return
+    colore = "#22c55e"
+    if rimasti <= alert_minutes * 60:
+        colore = "#ef4444"
+    elif rimasti <= (alert_minutes + 5) * 60:
+        colore = "#f59e0b"
+    mm, ss = divmod(max(0, int(rimasti)), 60)
+    st.markdown(
+        f'<div class="pw-card"><div class="k">Cambio stint tra</div>'
+        f'<div class="v" style="font-size:1.6rem;color:{colore};font-family:ui-monospace,Consolas,monospace">'
+        f'{mm:02d}:{ss:02d}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+@st.fragment(run_every=2)
+def render_sidebar_posizione(pilot: str | None, pit_stop_seconds: int) -> None:
+    """Posizione del nostro kart, rientro stimato dopo il pit e confronto con il miglior giro di gara."""
+    snap = st.session_state.get("apex_snapshot")
+    if not pilot or not snap or not snap.get("rows"):
+        st.markdown(
+            '<div class="pw-card"><div class="k">Il nostro kart</div>'
+            '<div class="v">Scegli "Chi sono io" per vedere la posizione</div></div>',
+            unsafe_allow_html=True,
+        )
+        return
+    identity = (st.session_state.get("apex_pilot_identities") or {}).get(pilot)
+    row = find_apex_row(snap, identity)
+    if not row:
+        st.markdown(
+            '<div class="pw-card"><div class="k">Il nostro kart</div>'
+            '<div class="v">Kart non presente nell\'ultimo aggiornamento</div></div>',
+            unsafe_allow_html=True,
+        )
+        return
+    rows = snap["rows"]
+    rientro = estimate_apex_rejoin_position(row, rows, pit_stop_seconds)
+    migliori = [pro_tools.lap_to_seconds(r.get("best_lap")) for r in rows]
+    migliori = [x for x in migliori if x]
+    miglior_gara = min(migliori) if migliori else None
+    ultimo = pro_tools.lap_to_seconds(row.get("last_lap"))
+    if miglior_gara and ultimo:
+        differenza = ultimo - miglior_gara
+        confronto = "miglior giro di gara" if differenza <= 0.0005 else f"+{differenza:.3f} s"
+    else:
+        confronto = "—"
+    gap = "Leader" if row.get("position") == 1 else (row.get("gap") or "—")
+    st.markdown(
+        '<div class="pw-card"><div class="k">Il nostro kart</div>'
+        f'<div class="v">P{html.escape(str(row.get("position") or "—"))} · Kart {html.escape(str(row.get("kart") or "—"))} · {html.escape(gap)}</div>'
+        '<div class="k" style="margin-top:.45rem">Dopo il pit saresti circa</div>'
+        f'<div class="v">P{html.escape(str(rientro or "—"))}</div>'
+        '<div class="k" style="margin-top:.45rem">Ultimo giro · rispetto al miglior giro di gara</div>'
+        f'<div class="v">{html.escape(row.get("last_lap") or "—")} · {confronto}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _salva_note_pilota(gid: str) -> None:
+    gare.salva_note_pilota(gid, st.session_state.get(f"note_{gid}") or "")
+
+
 SIDEBAR_CSS = """
 <style>
 [data-testid="stSidebar"] > div:first-child { background: linear-gradient(180deg, #0b1020 0%, #111a2e 100%); }
@@ -1576,7 +1656,18 @@ with st.sidebar:
             value=30,
             step=5,
         )
+        st.toggle("Alto contrasto nelle tabelle", value=False, key="alto_contrasto")
+        st.toggle(
+            "Suono per penalità e pit", value=False, key="suono_notifiche",
+            help="Il browser può bloccare il suono finché non tocchi la pagina.",
+        )
 
+    if st.session_state.get("alto_contrasto"):
+        st.markdown(
+            "<style>.pw-table td, .pw-table th { color:#ffffff !important; font-size:1rem !important; font-weight:600; }"
+            ".pw-table tr td { background: rgba(255,255,255,0.02); }</style>",
+            unsafe_allow_html=True,
+        )
     if not pilot_options:
         st.caption("Cerca i piloti per compilare la selezione.")
     elif st.session_state.get("timing_provider") == "test":
@@ -1585,6 +1676,19 @@ with st.sidebar:
         st.caption("Classifica, tempi e giri provengono dal flusso live Apex.")
     else:
         st.caption("Per questo sito sono disponibili i nomi; la telemetria resta simulata.")
+
+    render_sidebar_stint(max_stint, alert_minutes)
+    render_sidebar_posizione(selected_pilot, pit_stop_seconds)
+    if gara_sb:
+        st.text_area(
+            "📝 Note per il pilota",
+            value=gara_sb.get("note_pilota") or "",
+            key=f"note_{gara_sb['id']}",
+            placeholder="Es. gomme posteriori consumate, traffico al giro 30",
+            height=90,
+            on_change=_salva_note_pilota,
+            args=(gara_sb["id"],),
+        )
 
     snap_sb = st.session_state.get("apex_snapshot") or {}
     ultimo_frame = snap_sb.get("last_message_at") or snap_sb.get("received_at")
@@ -2209,6 +2313,20 @@ def render_analysis(provider: str | None, history_limit: int) -> None:
         st.info("Cerca un Live Timing per iniziare una sessione di analisi.")
 
 
+def _csv_riepilogo(rows: list[dict], penalita: dict, recuperi: dict) -> bytes:
+    """Classifica con penalità e recuperi, in CSV apribile da Excel."""
+    buf = io.StringIO()
+    scrittore = csv.writer(buf)
+    scrittore.writerow(["Posizione", "Kart", "Team", "Giri", "Miglior giro", "Pit", "Penalità (s)", "Recupero (s)"])
+    for r in rows:
+        k = str(r["kart"])
+        scrittore.writerow([
+            r.get("position"), k, r.get("team"), r.get("laps_completed"), r.get("best_lap"),
+            r.get("pits"), penalita.get(k, 0), recuperi.get(k, 0),
+        ])
+    return buf.getvalue().encode("utf-8-sig")
+
+
 def penalita_da_commenti(comments: list[dict]) -> dict[str, float]:
     """Penalità di ogni kart dai commenti Apex: "13 Avviso - Penalità 10" → kart 13, +10 s."""
     totali: dict[str, float] = {}
@@ -2298,6 +2416,12 @@ def render_classifica_sotto() -> None:
         unsafe_allow_html=True,
     )
     render_rettifiche(snapshot["rows"], gara_vista)
+    st.download_button(
+        "📄 Scarica riepilogo CSV",
+        data=_csv_riepilogo(snapshot["rows"], penalita, recuperi),
+        file_name=f"riepilogo_{(gara_vista or {}).get('id', 'gara')}.csv",
+        mime="text/csv",
+    )
     with st.expander("Diagnostica feed Apex", expanded=False):
         st.caption(
             "Celle ricevute per la prima riga: tipo colonna → testo. "
@@ -2348,12 +2472,22 @@ def notify(text: str, kind: str = "info") -> None:
     del items[100:]
 
 
-def _toast_html(items: list[dict]) -> str:
+def _toast_html(items: list[dict], suono: bool = False) -> str:
     """Script che mostra le notifiche nella pagina principale (scorre da destra e sparisce da sola)."""
     payload = json.dumps(items, ensure_ascii=False).replace("</", "<\\/")
     return f"""<script>
 (function() {{
   const items = {payload};
+  const SUONO = {'true' if suono else 'false'};
+  function beep() {{
+    try {{
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AC();
+      const o = ctx.createOscillator(); const g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = 880; g.gain.value = 0.08;
+      o.connect(g); g.connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 0.2);
+    }} catch (e) {{}}
+  }}
   try {{
     const win = window.parent;
     const doc = win.document;
@@ -2380,8 +2514,10 @@ def _toast_html(items: list[dict]) -> str:
     const MAX_VISIBILI = 4;
     win.__pwSeen = win.__pwSeen || {{}};
     const colori = {{ penalita: '#ff4b4b', team: '#ffa500', pos: '#21c55d', pit: '#3b82f6', best: '#a855f7' }};
+    let suonare = false;
     for (const it of items) {{
       if (win.__pwSeen[it.id]) continue;
+      if (['penalita', 'pit'].includes(it.kind)) suonare = true;
       win.__pwSeen[it.id] = true;
       const d = doc.createElement('div');
       d.className = 'pw-toast';
@@ -2392,6 +2528,7 @@ def _toast_html(items: list[dict]) -> str:
       while (root.children.length > MAX_VISIBILI) root.removeChild(root.lastChild);
       win.setTimeout(() => {{ if (d.parentNode) d.parentNode.removeChild(d); }}, 6000);
     }}
+    if (SUONO && suonare) beep();
   }} catch (e) {{ console.log('notifiche', e); }}
 }})();
 </script>"""
@@ -2406,7 +2543,7 @@ def render_toasts() -> None:
     payload = [{"id": n["id"], "text": n["text"], "kind": n["kind"]} for n in reversed(nuove)]
     for n in nuove:
         n["mostrata"] = True
-    components.html(_toast_html(payload), height=0)
+    components.html(_toast_html(payload, bool(st.session_state.get("suono_notifiche"))), height=0)
 
 
 def _rimuovi_notifica(nid: int) -> None:

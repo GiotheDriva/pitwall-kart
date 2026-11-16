@@ -834,6 +834,11 @@ def aggiungi_rettifica(gara_id: str, kart: str, tipo: str, valore: float, motivo
     _aggiorna(gara_id, fn)
 
 
+def salva_note_pilota(gara_id: str, testo: str) -> None:
+    """Nota di gara per il pilota, mostrata nel menu laterale."""
+    _aggiorna(gara_id, lambda g: g.__setitem__("note_pilota", testo.strip()))
+
+
 def elimina_rettifica(gara_id: str, rett_id: str) -> None:
     def fn(g):
         g["rettifiche"] = [r for r in g.get("rettifiche", []) if r.get("id") != rett_id]
