@@ -1433,9 +1433,31 @@ for key, default in {
         st.session_state[key] = default
 
 
+SIDEBAR_CSS = """
+<style>
+[data-testid="stSidebar"] > div:first-child { background: linear-gradient(180deg, #0b1020 0%, #111a2e 100%); }
+[data-testid="stSidebar"] h3 { font-family: "Inter", system-ui, sans-serif; letter-spacing: -0.01em; }
+.pw-brand { display:flex; align-items:center; gap:.6rem; margin:.2rem 0 .8rem; }
+.pw-brand b { font-size:1.25rem; color:#f8fafc; letter-spacing:.02em; }
+.pw-brand span { display:block; font-size:.72rem; color:#94a3b8; letter-spacing:.08em; text-transform:uppercase; }
+.pw-card { border:1px solid rgba(148,163,184,.22); border-radius:.8rem; padding:.7rem .85rem; margin:.5rem 0;
+  background: rgba(15,23,42,.65); box-shadow: 0 6px 18px rgba(0,0,0,.25); }
+.pw-card .k { font-size:.68rem; letter-spacing:.09em; text-transform:uppercase; color:#94a3b8; }
+.pw-card .v { font-size:.95rem; color:#f1f5f9; font-weight:600; margin-top:.1rem; }
+.pw-live-dot { display:inline-block; width:.55rem; height:.55rem; border-radius:50%; margin-right:.4rem; }
+.pw-live-dot.on { background:#22c55e; box-shadow:0 0 0 0 rgba(34,197,94,.7); animation: pwPulse 1.6s infinite; }
+.pw-live-dot.off { background:#ef4444; }
+@keyframes pwPulse { 0% { box-shadow:0 0 0 0 rgba(34,197,94,.6);} 70% { box-shadow:0 0 0 8px rgba(34,197,94,0);} 100% { box-shadow:0 0 0 0 rgba(34,197,94,0);} }
+</style>
+"""
+
 with st.sidebar:
-    st.title("🏁 Pit Wall")
-    st.caption("Strategia endurance · Go-Kart")
+    st.markdown(SIDEBAR_CSS, unsafe_allow_html=True)
+    st.markdown(
+        '<div class="pw-brand"><div style="font-size:1.7rem">🏁</div>'
+        '<div><b>Pit Wall</b><span>Strategia endurance · Go-Kart</span></div></div>',
+        unsafe_allow_html=True,
+    )
     timing_url = st.text_input(
         "URL del Live Timing",
         placeholder="https://…",
@@ -1483,7 +1505,7 @@ with st.sidebar:
             st.session_state["apex_snapshot"] = None
             st.error(f"Impossibile leggere il Live Timing: {exc}")
 
-    if st.button("Cerca Piloti in pista", use_container_width=True):
+    if st.button("🔄 Aggiorna piloti dal Live Timing", use_container_width=True):
         st.session_state["_auto_cerca"] = False
         if not timing_url.strip():
             st.error("Inserisci prima l'URL del Live Timing.")
@@ -1522,25 +1544,14 @@ with st.sidebar:
         key="selected_pilot",
     )
 
-    max_stint = st.number_input(
-        "Max Stint (minuti)",
-        min_value=1,
-        max_value=300,
-        value=45,
-        step=1,
-        key="max_stint_minutes",
-    )
-    pit_stop_seconds = st.number_input(
-        "Tempo Pit Stop (secondi)",
-        min_value=0,
-        max_value=600,
-        value=120,
-        step=5,
-        key="pit_stop_seconds",
-    )
+    # Stint e pit arrivano dal Pianificatore della gara aperta (valori di riserva se manca il piano).
+    gara_sb = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA))
+    piano_sb = (gara_sb or {}).get("piano") or {}
+    max_stint = int(round(float(piano_sb.get("stint_min") or 45)))
+    pit_stop_seconds = int(round(float(piano_sb.get("pit_sec") or 120)))
     live_timing = st.toggle("Avvia Live Timing", value=False, key="live_timing")
 
-    with st.expander("Personalizza muretto", expanded=False):
+    with st.expander("⚙️ Impostazioni muretto", expanded=False):
         refresh_interval = st.slider(
             "Aggiornamento interfaccia",
             min_value=0.15,
@@ -1551,7 +1562,7 @@ with st.sidebar:
             help="Il WebSocket Apex resta sempre in ascolto. Questo intervallo regola solo il ridisegno della dashboard.",
         )
         alert_minutes = st.number_input(
-            "Avviso stint prima (min)",
+            "Avviso prima del cambio (min)",
             min_value=1,
             max_value=30,
             value=5,
@@ -1565,11 +1576,6 @@ with st.sidebar:
             value=30,
             step=5,
         )
-        next_driver = st.text_input(
-            "Prossimo pilota (facoltativo)",
-            placeholder="Nome per il prossimo stint",
-            key="next_driver",
-        )
 
     if not pilot_options:
         st.caption("Cerca i piloti per compilare la selezione.")
@@ -1580,9 +1586,23 @@ with st.sidebar:
     else:
         st.caption("Per questo sito sono disponibili i nomi; la telemetria resta simulata.")
 
-    st.caption(
-        f"Ridisegno ogni {refresh_interval:.2f} s · feed live indipendente"
+    snap_sb = st.session_state.get("apex_snapshot") or {}
+    ultimo_frame = snap_sb.get("last_message_at") or snap_sb.get("received_at")
+    eta = time.time() - ultimo_frame if ultimo_frame else None
+    feed_ok = bool(snap_sb.get("connected")) and eta is not None and eta < 30
+    provider_sb = st.session_state.get("timing_provider")
+    provider_nome = {"apex": "Apex Timing", "html": "Tabella web", "test": "Gara TEST"}.get(provider_sb, "Nessuna")
+    nome_gara = html.escape((gara_sb or {}).get("nome") or "Nessuna gara aperta")
+    st.markdown(
+        f'<div class="pw-card"><div class="k">Gara aperta</div><div class="v">{nome_gara}</div>'
+        f'<div class="k" style="margin-top:.45rem">Feed</div>'
+        f'<div class="v"><span class="pw-live-dot {"on" if feed_ok else "off"}"></span>'
+        f'{provider_nome} · {len(pilot_options)} piloti/team</div>'
+        f'<div class="k" style="margin-top:.45rem">Piano</div>'
+        f'<div class="v">Stint {max_stint} min · pit {pit_stop_seconds} s</div></div>',
+        unsafe_allow_html=True,
     )
+    st.caption(f"Ridisegno ogni {refresh_interval:.2f} s")
 
 
 def render_live_dashboard(
@@ -1903,11 +1923,7 @@ def render_live_dashboard(
             st.session_state["_stint_offset_s"] = race_elapsed_corrente or 0.0
             st.session_state["_five_minute_logged"] = False
             st.session_state["_stint_end_logged"] = False
-            next_driver = st.session_state.get("next_driver", "").strip()
-            add_event(
-                f"🛠️ PIT IN manuale · nuovo stint"
-                f"{' · prossimo: ' + next_driver if next_driver else ''}"
-            )
+            add_event("🛠️ PIT IN manuale · nuovo stint")
         if flag_col.button("🟡 Bandiera gialla", use_container_width=True):
             add_event("🟡 Bandiera gialla · valutare ritmo e traffico")
         if traffic_col.button("🚦 Traffico", use_container_width=True):
