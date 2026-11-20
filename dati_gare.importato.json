@@ -1,0 +1,40 @@
+[
+  {
+    "id": "1b86f5fbda27",
+    "nome": "w",
+    "tipo": "Endurance",
+    "ore": 1.0,
+    "giri": null,
+    "team": "w",
+    "piloti": [
+      "GIOVANNI",
+      "DEAM"
+    ],
+    "quota": 0.0,
+    "pit_minimo": 3,
+    "pagata": false,
+    "data_pagamento": "",
+    "data": "2026-10-28",
+    "link": "https://www.apex-timing.com/live-timing/kartandgo/",
+    "note": "",
+    "creata": "2026-10-28T22:49:14",
+    "cronometro": {
+      "stato": "in_corso",
+      "offset_s": 0.0,
+      "avvio": 1793224581.418776,
+      "usa_apex": false
+    },
+    "piano": {
+      "ore": 1.0,
+      "stint_min": 15.0,
+      "pit_sec": 120.0,
+      "min_stint": 10.0,
+      "pit_minimo": 3,
+      "piloti": [
+        "GIOVANNI",
+        "DEAM"
+      ]
+    },
+    "pit_eseguiti": []
+  }
+]
