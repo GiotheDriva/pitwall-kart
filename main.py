@@ -24,7 +24,9 @@ from bs4 import BeautifulSoup
 import streamlit.components.v1 as components
 
 import pro_tools
+import facile
 import gare
+import home
 import piano
 import simulatore
 
@@ -98,6 +100,17 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+if st.query_params.get("vista") == "facile" or st.session_state.get("modalita_facile"):
+    facile.render()
+    st.stop()
+
+
+if st.session_state.get(gare.VISTA, "home") == "home":
+    pro_tools.inject_style()
+    home.render()
+    st.stop()
 
 
 gare.route()
@@ -301,7 +314,6 @@ def is_apex_timing_url(url: str) -> bool:
     return (
         parsed.scheme in {"http", "https"}
         and (host == "apex-timing.com" or host.endswith(".apex-timing.com"))
-        and "/live-timing/" in parsed.path.lower()
     )
 
 
@@ -402,6 +414,9 @@ def parse_apex_comments(value: str) -> list[dict]:
     return comments
 
 
+LAP_COUNTER = re.compile(r"\b(?:giro|lap|vuelta)\s*(\d+)\s*/\s*(\d+)", re.IGNORECASE)
+
+
 def parse_apex_frame(frame: str, state: dict | None = None) -> dict:
     """Apply one Apex WebSocket message to the persistent standings state.
 
@@ -452,6 +467,13 @@ def parse_apex_frame(frame: str, state: dict | None = None) -> dict:
         elif key == "dyn1":
             fields["timer_type"] = value_type.strip().lower()
             fields["timer_value"] = value.strip()
+        else:
+            # Campi non riconosciuti: li tengo in diagnostica e cerco il conteggio giri "nn/mm".
+            diagnostica_campi = state.setdefault("diag", {})
+            diagnostica_campi[key] = f"[{value_type}] {value[:120]}"
+            conta = LAP_COUNTER.search(value) or re.fullmatch(r"\s*(\d+)\s*/\s*(\d+)\s*", value)
+            if conta:
+                fields["giri"] = (int(conta.group(1)), int(conta.group(2)))
 
     rows: list[dict] = []
     debug_sample: list[tuple[str, str]] = []
@@ -509,6 +531,8 @@ def parse_apex_frame(frame: str, state: dict | None = None) -> dict:
         "standings_received_at": time.time() if rows else None,
         "pilots": list(dict.fromkeys(row["team"] for row in rows)),
         "comments": parse_apex_comments(fields.get("com", "")),
+        "giri": ({"fatti": fields["giri"][0], "totali": fields["giri"][1]} if "giri" in fields else None),
+        "diagnostica": dict(state.get("diag", {})),
         "debug": {"sample": [list(item) for item in debug_sample]},
     }
 
@@ -594,6 +618,9 @@ def _run_apex_feed(feed_key: str, websocket_url: str, stop_event: threading.Even
                                 snapshot["standings_received_at"] = now
                             if update["event_title"]:
                                 snapshot["event_title"] = update["event_title"]
+                            if update.get("giri") is not None:
+                                snapshot["giri"] = update["giri"]
+                            snapshot["diagnostica"] = update.get("diagnostica") or {}
                             if update.get("comments"):
                                 commenti = snapshot.setdefault("comments", [])
                                 noti = {(c["time"], c["text"]) for c in commenti}
@@ -1483,6 +1510,11 @@ def stint_residuo_ora(max_stint: int) -> tuple[float | None, bool]:
 @st.fragment(run_every=1)
 def render_sidebar_stint(max_stint: int, alert_minutes: int) -> None:
     """Conto alla rovescia dello stint, allineato al pannello centrale."""
+    if st.session_state.get("_tipo_gara") in ("Sprint", "Noleggio"):
+        return  # lo stint esiste solo nelle endurance
+    if st.session_state.get("_gara_finita"):
+        st.caption("Gara terminata: stint fermo.")
+        return
     rimasti, in_sosta = stint_residuo_ora(max_stint)
     if in_sosta:
         st.markdown(
@@ -1755,6 +1787,34 @@ with st.sidebar:
     st.caption(f"Ridisegno ogni {refresh_interval:.2f} s")
 
 
+def _e_arrivo(testo: str) -> bool:
+    """Commento Apex che segna la fine della gara (es. «Arrivo»)."""
+    t = re.sub(r"\s+", " ", str(testo or "")).strip().strip(".!").lower()
+    return t in {"arrivo", "finish", "fine gara", "bandiera a scacchi"}
+
+
+def render_giri_sprint(snapshot: dict | None, race_finita: bool) -> None:
+    """Pannello della sprint: solo giri e stato gara, niente stint."""
+    st.subheader("Giri gara")
+    if race_finita:
+        st.info("Gara terminata")
+    giri = (snapshot or {}).get("giri")
+    if not giri:
+        st.info("Il live Apex non mostra il conteggio giri per questa gara.")
+        diag = (snapshot or {}).get("diagnostica") or {}
+        with st.expander("Diagnostica Apex (campi ricevuti dal live)", expanded=True):
+            if diag:
+                st.dataframe(
+                    pd.DataFrame([{"Campo": k, "Valore ricevuto": v} for k, v in sorted(diag.items())]),
+                    hide_index=True, use_container_width=True,
+                )
+            else:
+                st.caption("Nessun campo ricevuto ancora dal live.")
+        return
+    fatti, totali = giri["fatti"], giri["totali"]
+    st.progress(min(1.0, fatti / totali) if totali else 0.0, text=f"Giro {fatti} / {totali}")
+
+
 def render_live_dashboard(
     provider: str | None,
     pilot: str,
@@ -1841,6 +1901,7 @@ def render_live_dashboard(
         )
 
     gara_aperta = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA))
+    facile.pubblica(gara_aperta, apex_row, race_remaining, lambda: stint_residuo_ora(max_stint_minutes))
     if gara_aperta and gara_aperta.get("tipo") == "Endurance":
         piano.render_card(gara_aperta, race_remaining, gare)
 
@@ -1903,6 +1964,9 @@ def render_live_dashboard(
             second_row.metric("Giro in corso", current_lap, apex_row["on_track"] or None)
             if gara_aperta and gara_aperta.get("tipo") in ("Endurance", "Sprint"):
                 st.metric("Kart ai box", kart_ai_box(pit_stop_seconds))
+            if gara_aperta and gara_aperta.get("tipo") == "Sprint":
+                _giri = (snapshot or {}).get("giri")
+                st.metric("Giri gara", f"{_giri['fatti']} / {_giri['totali']}" if _giri else "—")
             st.session_state["_ultimo_pit_apex"] = apex_row.get("last_pit") or ""
             st.caption(
                 f"Kart {apex_row['kart'] or '—'} · pit stop "
@@ -1935,6 +1999,12 @@ def render_live_dashboard(
     in_sosta = False
     ripartenza_s = 0.0
     race_finita = race_remaining is not None and race_remaining <= 0.5
+    if provider == "apex" and snapshot:
+        giri_snap = snapshot.get("giri")
+        if any(_e_arrivo(c.get("text", "")) for c in snapshot.get("comments", [])):
+            race_finita = True
+        if giri_snap and giri_snap["totali"] and giri_snap["fatti"] >= giri_snap["totali"]:
+            race_finita = True
     # Lo stint parte solo quando parte la gara (countdown Apex o cronometro del muretto).
     # Finché non parte, il timer di sessione resta a zero e lo stint non scende.
     gara_in_attesa = bool(race_total) and not race_finita and not _gara_avviata(gara_aperta, race_remaining)
@@ -1995,7 +2065,11 @@ def render_live_dashboard(
     else:
         race_elapsed_corrente = None
 
-    if not noleggio:
+    st.session_state["_gara_finita"] = race_finita
+    if st.session_state.get("_tipo_gara") == "Sprint":
+        with strategy_col:
+            render_giri_sprint(snapshot, race_finita)
+    elif not noleggio:
         with strategy_col:
             st.subheader("Stint residuo")
             if race_finita:
@@ -2697,8 +2771,12 @@ def render_campana() -> None:
                            on_click=_rimuovi_notifica, args=(n["id"],))
 
 
-titolo_col, campana_col = st.columns([6, 1])
+titolo_col, semplice_col, campana_col = st.columns([5, 1.6, 1])
 titolo_col.title("🏁 Pit Wall Engineering")
+with semplice_col:
+    if st.button("📱 Modalità semplice", use_container_width=True, help="Vista semplificata per la famiglia"):
+        st.session_state["modalita_facile"] = True
+        st.rerun()
 with campana_col:
     render_campana()
 render_toasts()
@@ -2869,6 +2947,28 @@ with confronto_tab:
 with settings_tab:
     gara_s = gare.trova(gare.load_gare(), st.session_state.get(gare.VISTA))
     st.subheader("Impostazioni gara")
+    if gara_s:
+        st.markdown("#### 📱 Modalità semplice (famiglia)")
+        _feed_att = facile.load_mamma_feed()
+        _condivisa = bool(_feed_att.get("attiva")) and _feed_att.get("gara_id") == gara_s["id"]
+        _c1, _c2 = st.columns(2)
+        if _c1.button(
+            "✅ Gara condivisa" if _condivisa else "📱 Condividi in modalità semplice",
+            type="secondary" if _condivisa else "primary",
+            key=f"share_facile_{gara_s['id']}",
+            use_container_width=True,
+        ):
+            facile.set_mamma_gara(gara_s)
+            st.rerun()
+        if _condivisa and _c2.button("🛑 Interrompi condivisione", key=f"stop_facile_{gara_s['id']}",
+                                     use_container_width=True):
+            facile.set_mamma_gara(None)
+            st.rerun()
+        st.caption(
+            "La famiglia apre lo stesso indirizzo dell'app aggiungendo **`?vista=facile`** in fondo, "
+            "oppure usa il pulsante **📱 Modalità semplice** in alto. Il muretto deve restare aperto."
+        )
+        st.divider()
     if gara_s and gara_s.get("stato") != "conclusa":
         st.write(
             "A gara finita premi il pulsante: salvo giri, analisi, pit, penalità e registro "

@@ -108,12 +108,53 @@ def save_sponsor(sponsor: list[dict]) -> None:
     if client is None:
         altri = [r for r in _leggi_locale() if r.get("id") != SPONSOR_ID]
         tmp = DATA_FILE.with_suffix(".tmp")
-        gare_locali = [r for r in altri if not str(r.get("id", "")).startswith("__")]
-        tmp.write_text(json.dumps(gare_locali + [record], ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(json.dumps(altri + [record], ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, DATA_FILE)
         return
     client.table("gare").upsert([{"id": SPONSOR_ID, "dati": record}]).execute()
     _leggi_remoto.clear()
+
+
+MAMMA_ID = "__mamma__"  # record speciale: feed della modalità semplice per la famiglia
+
+
+def load_mamma_feed() -> dict:
+    """Feed della modalità semplice. Su Supabase legge sempre il dato fresco, senza cache."""
+    client = _client()
+    if client is not None:
+        righe = client.table("gare").select("dati").eq("id", MAMMA_ID).execute().data or []
+        dati = righe[0].get("dati") if righe else None
+        return dict(dati.get("feed") or {}) if isinstance(dati, dict) else {}
+    for r in _leggi_locale():
+        if r.get("id") == MAMMA_ID:
+            return dict(r.get("feed") or {})
+    return {}
+
+
+def save_mamma_feed(feed: dict) -> None:
+    record = {"id": MAMMA_ID, "feed": json.loads(json.dumps(feed, default=str))}
+    client = _client()
+    if client is None:
+        altri = [r for r in _leggi_locale() if r.get("id") != MAMMA_ID]
+        tmp = DATA_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(altri + [record], ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, DATA_FILE)
+        return
+    client.table("gare").upsert([{"id": MAMMA_ID, "dati": record}]).execute()
+    _leggi_remoto.clear()
+
+
+def set_mamma_gara(gara: dict | None) -> None:
+    """Sceglie la gara mostrata nella modalità semplice (None = interrompe la condivisione)."""
+    if gara is None:
+        save_mamma_feed({})
+        return
+    save_mamma_feed({
+        "attiva": True,
+        "gara_id": gara["id"],
+        "gara_nome": gara.get("nome") or "",
+        "updated_at": datetime.now().timestamp(),
+    })
 
 
 def residuo_sponsor(sponsor: dict, gare_lista: list[dict], escludi_gara: str | None = None) -> float:
